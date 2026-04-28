@@ -42,7 +42,12 @@ self.onmessage = async (event: MessageEvent) => {
           custom_font
         );
       } else {
-        renderResult = render_map_binary(roads_shards, water_bin, parks_bin, config_json);
+        renderResult = render_map_binary(
+          roads_shards,
+          water_bin,
+          parks_bin,
+          config_json
+        );
       }
 
       if (renderResult.is_success()) {

@@ -32,6 +32,7 @@ const geoJsonReader = new GeoJSONReader(geometryFactory);
 const geoJsonWriter = new GeoJSONWriter();
 
 const COORD_EPSILON = 1e-9;
+const ENDPOINT_KEY_DIGITS = 8;
 const BOUNDARY_TOLERANCE = 1e-6;
 const MIN_SEA_POLYGON_AREA_M2 = 1;
 
@@ -39,6 +40,10 @@ export function mergeSeaPolygonsIntoWaterGeoJSON(
   waterGeo: FeatureCollection,
   options: ViewportOptions
 ): FeatureCollection {
+  if (hasGeneratedSeaPolygons(waterGeo)) {
+    return waterGeo;
+  }
+
   const coastlineFeatures = extractCoastlineFeatures(waterGeo);
   if (coastlineFeatures.length === 0) {
     return waterGeo;
@@ -58,6 +63,10 @@ export function mergeSeaPolygonsIntoWaterGeoJSON(
     ...waterGeo,
     features: [...waterGeo.features, ...seaPolygons],
   };
+}
+
+export function hasGeneratedSeaPolygons(waterGeo: FeatureCollection): boolean {
+  return waterGeo.features.some((feature) => feature.properties?.generated === "coastline-sea");
 }
 
 export function buildViewportBbox({
@@ -97,17 +106,17 @@ export function buildSeaPolygonsFromCoastlines(
   viewportBbox: BBox,
   centerPoint: LonLatPoint
 ): Array<Feature<Polygon>> {
-  const mergedLineStrings = mergeConnectedCoastlines(coastlineFeatures);
-  const clippedFragments = mergedLineStrings.flatMap((line) =>
-    clipLineStringToBbox(line, viewportBbox)
+  const clippedFragments = coastlineFeatures.flatMap((feature) =>
+    featureToLineStrings(feature).flatMap((line) => clipLineStringToBbox(line, viewportBbox))
   );
 
   if (clippedFragments.length === 0) {
     return [];
   }
 
+  const mergedLineStrings = mergeConnectedLineStrings(clippedFragments);
   const polygonizer = new Polygonizer();
-  const linework = [...clippedFragments, ...buildViewportBoundarySegments(viewportBbox)];
+  const linework = [...mergedLineStrings, ...buildViewportBoundarySegments(viewportBbox)];
   const lineGeometries = new ArrayList([]);
 
   for (const line of linework) {
@@ -174,40 +183,34 @@ export function buildSeaPolygonsFromCoastlines(
     });
 }
 
-function mergeConnectedCoastlines(
-  coastlineFeatures: Array<Feature<LineString | MultiLineString>>
-): LonLatPoint[][] {
-  const pending: LonLatPoint[][] = [];
-
-  for (const feature of coastlineFeatures) {
-    if (feature.geometry.type === "LineString") {
-      pending.push(feature.geometry.coordinates as LonLatPoint[]);
-    } else {
-      for (const line of feature.geometry.coordinates) {
-        pending.push(line as LonLatPoint[]);
-      }
-    }
+function featureToLineStrings(feature: Feature<LineString | MultiLineString>): LonLatPoint[][] {
+  if (feature.geometry.type === "LineString") {
+    return [feature.geometry.coordinates as LonLatPoint[]];
   }
 
+  return feature.geometry.coordinates.map((line) => line as LonLatPoint[]);
+}
+
+function mergeConnectedLineStrings(lineStrings: LonLatPoint[][]): LonLatPoint[][] {
+  const segments = lineStrings.filter((line) => line.length >= 2);
+  if (segments.length <= 1) {
+    return segments.map((line) => [...line]);
+  }
+
+  const endpointIndex = buildEndpointIndex(segments);
+  const used = new Uint8Array(segments.length);
   const merged: LonLatPoint[][] = [];
 
-  while (pending.length > 0) {
-    let current = [...pending.pop()!];
-    let changed = true;
+  for (let i = 0; i < segments.length; i++) {
+    if (used[i]) continue;
 
-    while (changed) {
-      changed = false;
+    const current = [...segments[i]];
+    used[i] = 1;
 
-      for (let i = pending.length - 1; i >= 0; i--) {
-        const candidate = pending[i];
-        const mergedLine = tryMergeLineStrings(current, candidate);
-        if (!mergedLine) continue;
-
-        current = mergedLine;
-        pending.splice(i, 1);
-        changed = true;
-      }
-    }
+    extendLineEnd(current, segments, endpointIndex, used);
+    current.reverse();
+    extendLineEnd(current, segments, endpointIndex, used);
+    current.reverse();
 
     merged.push(current);
   }
@@ -215,26 +218,79 @@ function mergeConnectedCoastlines(
   return merged;
 }
 
-function tryMergeLineStrings(a: LonLatPoint[], b: LonLatPoint[]): LonLatPoint[] | null {
-  const aStart = a[0];
-  const aEnd = a[a.length - 1];
-  const bStart = b[0];
-  const bEnd = b[b.length - 1];
+function buildEndpointIndex(lineStrings: LonLatPoint[][]): Map<string, number[]> {
+  const endpointIndex = new Map<string, number[]>();
 
-  if (pointsAlmostEqual(aEnd, bStart)) {
-    return [...a, ...b.slice(1)];
-  }
-  if (pointsAlmostEqual(aEnd, bEnd)) {
-    return [...a, ...[...b].reverse().slice(1)];
-  }
-  if (pointsAlmostEqual(aStart, bEnd)) {
-    return [...b, ...a.slice(1)];
-  }
-  if (pointsAlmostEqual(aStart, bStart)) {
-    return [...[...b].reverse(), ...a.slice(1)];
+  for (let i = 0; i < lineStrings.length; i++) {
+    addEndpoint(endpointIndex, lineStrings[i][0], i);
+    addEndpoint(endpointIndex, lineStrings[i][lineStrings[i].length - 1], i);
   }
 
-  return null;
+  return endpointIndex;
+}
+
+function addEndpoint(index: Map<string, number[]>, point: LonLatPoint, lineIndex: number) {
+  const key = pointKey(point);
+  const bucket = index.get(key);
+  if (bucket) {
+    bucket.push(lineIndex);
+  } else {
+    index.set(key, [lineIndex]);
+  }
+}
+
+function extendLineEnd(
+  line: LonLatPoint[],
+  segments: LonLatPoint[][],
+  endpointIndex: Map<string, number[]>,
+  used: Uint8Array
+) {
+  while (true) {
+    const endpoint = line[line.length - 1];
+    const candidates = endpointIndex.get(pointKey(endpoint));
+    if (!candidates) {
+      return;
+    }
+
+    let nextIndex = -1;
+    let reverse = false;
+
+    for (const candidateIndex of candidates) {
+      if (used[candidateIndex]) continue;
+
+      const candidate = segments[candidateIndex];
+      if (pointsAlmostEqual(endpoint, candidate[0])) {
+        nextIndex = candidateIndex;
+        reverse = false;
+        break;
+      }
+      if (pointsAlmostEqual(endpoint, candidate[candidate.length - 1])) {
+        nextIndex = candidateIndex;
+        reverse = true;
+        break;
+      }
+    }
+
+    if (nextIndex === -1) {
+      return;
+    }
+
+    used[nextIndex] = 1;
+    appendLine(line, segments[nextIndex], reverse);
+  }
+}
+
+function appendLine(target: LonLatPoint[], source: LonLatPoint[], reverse: boolean) {
+  if (reverse) {
+    for (let i = source.length - 2; i >= 0; i--) {
+      pushUniquePoint(target, source[i]);
+    }
+    return;
+  }
+
+  for (let i = 1; i < source.length; i++) {
+    pushUniquePoint(target, source[i]);
+  }
 }
 
 function buildViewportBoundarySegments(bbox: BBox): LonLatPoint[][] {
@@ -428,6 +484,10 @@ function pushUniquePoint(points: LonLatPoint[], nextPoint: LonLatPoint) {
 
 function pointsAlmostEqual(a: LonLatPoint, b: LonLatPoint): boolean {
   return Math.abs(a[0] - b[0]) <= COORD_EPSILON && Math.abs(a[1] - b[1]) <= COORD_EPSILON;
+}
+
+function pointKey(point: LonLatPoint): string {
+  return `${roundCoord(point[0], ENDPOINT_KEY_DIGITS)},${roundCoord(point[1], ENDPOINT_KEY_DIGITS)}`;
 }
 
 function roundCoord(value: number, digits: number): number {

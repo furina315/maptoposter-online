@@ -107,23 +107,8 @@ impl MapRenderer {
             return;
         }
         let color = parse_hex_color(&self.theme.water);
-        let mut pb = PathBuilder::new();
         for feature in water_features {
-            self.add_poly_to_path(&mut pb, feature);
-        }
-
-        if let Some(path) = pb.finish() {
-            let mut paint = Paint::default();
-            paint.set_color(color);
-            paint.anti_alias = true;
-
-            self.pixmap.fill_path(
-                &path,
-                &paint,
-                FillRule::EvenOdd,
-                Transform::identity(),
-                None,
-            );
+            self.fill_poly_feature(feature, color);
         }
     }
 
@@ -133,23 +118,8 @@ impl MapRenderer {
             return;
         }
         let color = parse_hex_color(&self.theme.parks);
-        let mut pb = PathBuilder::new();
         for feature in park_features {
-            self.add_poly_to_path(&mut pb, feature);
-        }
-
-        if let Some(path) = pb.finish() {
-            let mut paint = Paint::default();
-            paint.set_color(color);
-            paint.anti_alias = true;
-
-            self.pixmap.fill_path(
-                &path,
-                &paint,
-                FillRule::EvenOdd,
-                Transform::identity(),
-                None,
-            );
+            self.fill_poly_feature(feature, color);
         }
     }
 
@@ -307,19 +277,19 @@ impl MapRenderer {
     pub fn draw_polygons_bin(&mut self, data: &[f64], color_hex: &str) {
         if data.is_empty() {
             // 【优化】console::log_1 每次调用都会跨越 JS/WASM 边界，仅在 debug 模式保留
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
             web_sys::console::log_1(&format!("⚠️  多边形数据为空").into());
             return;
         }
         let poly_count = data[0] as usize;
 
         if poly_count == 0 {
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
             web_sys::console::log_1(&format!("⚠️  多边形数量为 0，颜色: {}", color_hex).into());
             return;
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, target_arch = "wasm32"))]
         web_sys::console::log_1(
             &format!("🌊 开始绘制 {} 个多边形，颜色: {}", poly_count, color_hex).into(),
         );
@@ -327,7 +297,6 @@ impl MapRenderer {
         let mut offset = 1;
         let color = parse_hex_color(color_hex);
 
-        let mut pb = PathBuilder::new();
         let mut found = false;
 
         for _idx in 0..poly_count {
@@ -338,6 +307,9 @@ impl MapRenderer {
             let int_ring_count = data[offset + 1] as usize;
             offset += 2;
 
+            let mut pb = PathBuilder::new();
+            let mut valid_polygon = false;
+
             if offset + ext_count * 2 <= data.len() && ext_count >= 3 {
                 let (sx, sy) = self.world_to_screen((data[offset], data[offset + 1]));
                 pb.move_to(sx, sy);
@@ -347,6 +319,7 @@ impl MapRenderer {
                     pb.line_to(sx, sy);
                 }
                 pb.close();
+                valid_polygon = true;
                 found = true;
             }
             offset += ext_count * 2;
@@ -369,25 +342,19 @@ impl MapRenderer {
                 }
                 offset += count * 2;
             }
+
+            if valid_polygon {
+                if let Some(path) = pb.finish() {
+                    self.fill_polygon_path(&path, color);
+                }
+            }
         }
 
         if found {
-            if let Some(path) = pb.finish() {
-                let mut paint = Paint::default();
-                paint.set_color(color);
-                paint.anti_alias = true;
-                self.pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::EvenOdd,
-                    Transform::identity(),
-                    None,
-                );
-                #[cfg(debug_assertions)]
-                web_sys::console::log_1(&format!("✅ 多边形绘制完成，颜色: {}", color_hex).into());
-            }
+            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
+            web_sys::console::log_1(&format!("✅ 多边形绘制完成，颜色: {}", color_hex).into());
         } else {
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
             web_sys::console::log_1(
                 &format!("⚠️  未找到有效的多边形数据，颜色: {}", color_hex).into(),
             );
@@ -609,7 +576,7 @@ impl MapRenderer {
 
         let poi_count = data[0] as usize;
         if data.len() < 1 + poi_count * 2 {
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, target_arch = "wasm32"))]
             web_sys::console::log_1(
                 &format!(
                     "❌ POI 数据长度不足: {} < {}",
@@ -703,7 +670,7 @@ impl MapRenderer {
             }
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, target_arch = "wasm32"))]
         web_sys::console::log_1(
             &format!(
                 "🔵 POI 采样完成: 原始 {} 个 → 采样后 {} 个，颜色: {}",
@@ -829,9 +796,31 @@ impl MapRenderer {
         }
     }
 
-    fn add_poly_to_path(&self, pb: &mut PathBuilder, poly: &PolyFeature) {
+    fn fill_poly_feature(&mut self, poly: &PolyFeature, color: Color) -> bool {
+        let mut pb = PathBuilder::new();
+        if !self.add_poly_to_path(&mut pb, poly) {
+            return false;
+        }
+
+        if let Some(path) = pb.finish() {
+            self.fill_polygon_path(&path, color);
+            return true;
+        }
+
+        false
+    }
+
+    fn fill_polygon_path(&mut self, path: &tiny_skia::Path, color: Color) {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        self.pixmap
+            .fill_path(path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+    }
+
+    fn add_poly_to_path(&self, pb: &mut PathBuilder, poly: &PolyFeature) -> bool {
         if poly.exterior.len() < 3 {
-            return;
+            return false;
         }
 
         // 外圈
@@ -856,6 +845,8 @@ impl MapRenderer {
             }
             pb.close();
         }
+
+        true
     }
 
     /// 绘制文字（使用 fontdue）
@@ -1281,9 +1272,8 @@ fn linear_to_srgb(c: f32) -> f32 {
 
 /// 预计算 sRGB u8 → 线性 f32 查找表（256 项）
 /// 在 `draw_gradient` 每次调用时复用，避免重复计算
-static SRGB_TO_LIN_LUT: LazyLock<[f32; 256]> = LazyLock::new(|| {
-    std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0))
-});
+static SRGB_TO_LIN_LUT: LazyLock<[f32; 256]> =
+    LazyLock::new(|| std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0)));
 
 /// 预计算线性 f32 → sRGB u8 查找表（1024 项，精度 1/1023）
 static LIN_TO_SRGB_LUT: LazyLock<[u8; 1024]> = LazyLock::new(|| {
@@ -1421,4 +1411,115 @@ fn point_to_segment_dist_sq(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 
     let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
     let (ex, ey) = (p.0 - cx, p.1 - cy);
     ex * ex + ey * ey
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiny_skia::PremultipliedColorU8;
+
+    fn test_theme() -> Theme {
+        Theme {
+            bg: "#000000".to_string(),
+            text: "#FFFFFF".to_string(),
+            gradient_color: "#000000".to_string(),
+            poi_color: "#FFFFFF".to_string(),
+            water: "#00FF00".to_string(),
+            parks: "#00AA00".to_string(),
+            road_motorway: "#FFFFFF".to_string(),
+            road_primary: "#FFFFFF".to_string(),
+            road_secondary: "#FFFFFF".to_string(),
+            road_tertiary: "#FFFFFF".to_string(),
+            road_residential: "#FFFFFF".to_string(),
+            road_default: "#FFFFFF".to_string(),
+        }
+    }
+
+    fn test_renderer() -> MapRenderer {
+        MapRenderer::new(
+            100,
+            100,
+            test_theme(),
+            BoundingBox::new(0.0, 100.0, 0.0, 100.0),
+            TextPosition::Top,
+        )
+        .unwrap()
+    }
+
+    fn solid_rect(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> PolyFeature {
+        PolyFeature {
+            exterior: vec![
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+                (min_x, min_y),
+            ],
+            interiors: vec![],
+        }
+    }
+
+    fn pixel_at(renderer: &MapRenderer, x: u32, y: u32) -> PremultipliedColorU8 {
+        renderer.pixmap.pixels()[(y * renderer.render_width() + x) as usize]
+    }
+
+    fn assert_solid_color(pixel: PremultipliedColorU8, red: u8, green: u8, blue: u8) {
+        assert_eq!(pixel.red(), red);
+        assert_eq!(pixel.green(), green);
+        assert_eq!(pixel.blue(), blue);
+        assert_eq!(pixel.alpha(), 255);
+    }
+
+    #[test]
+    fn draw_water_keeps_overlapping_polygons_filled() {
+        let mut renderer = test_renderer();
+        renderer.draw_background();
+
+        renderer.draw_water(&[
+            solid_rect(10.0, 10.0, 70.0, 70.0),
+            solid_rect(30.0, 30.0, 90.0, 90.0),
+        ]);
+
+        assert_solid_color(pixel_at(&renderer, 100, 100), 0, 255, 0);
+    }
+
+    #[test]
+    fn draw_polygons_bin_keeps_overlapping_polygons_filled() {
+        let mut renderer = test_renderer();
+        renderer.draw_background();
+
+        let data = [
+            2.0, 5.0, 0.0, 10.0, 10.0, 70.0, 10.0, 70.0, 70.0, 10.0, 70.0, 10.0, 10.0, 5.0, 0.0,
+            30.0, 30.0, 90.0, 30.0, 90.0, 90.0, 30.0, 90.0, 30.0, 30.0,
+        ];
+        renderer.draw_polygons_bin(&data, "#00FF00");
+
+        assert_solid_color(pixel_at(&renderer, 100, 100), 0, 255, 0);
+    }
+
+    #[test]
+    fn draw_water_keeps_polygon_interiors_unfilled() {
+        let mut renderer = test_renderer();
+        renderer.draw_background();
+
+        renderer.draw_water(&[PolyFeature {
+            exterior: vec![
+                (10.0, 10.0),
+                (90.0, 10.0),
+                (90.0, 90.0),
+                (10.0, 90.0),
+                (10.0, 10.0),
+            ],
+            interiors: vec![vec![
+                (40.0, 40.0),
+                (60.0, 40.0),
+                (60.0, 60.0),
+                (40.0, 60.0),
+                (40.0, 40.0),
+            ]],
+        }]);
+
+        assert_solid_color(pixel_at(&renderer, 100, 100), 0, 0, 0);
+        assert_solid_color(pixel_at(&renderer, 40, 40), 0, 255, 0);
+    }
 }

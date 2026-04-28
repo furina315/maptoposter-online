@@ -426,15 +426,21 @@ export function flattenPolygonsGeoJSON(geojson: GeoJSON.FeatureCollection): Floa
     (f) => f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon"
   );
 
-  // 使用数组暂存，最后统一转 Float64Array（多边形结构较复杂，预计算长度较难）
-  const result: number[] = [features.length];
+  let polygonCount = 0;
   for (const f of features) {
-    const geom = f.geometry as any;
+    const geom = f.geometry as GeoJSON.Polygon | GeoJSON.MultiPolygon;
+    polygonCount += geom.type === "Polygon" ? 1 : geom.coordinates.length;
+  }
+
+  // 使用数组暂存，最后统一转 Float64Array（多边形结构较复杂，预计算长度较难）
+  const result: number[] = [polygonCount];
+  for (const f of features) {
+    const geom = f.geometry as GeoJSON.Polygon | GeoJSON.MultiPolygon;
     if (geom.type === "Polygon") {
       addPolygonToData(result, geom.coordinates);
     } else if (geom.type === "MultiPolygon") {
-      if (geom.coordinates.length > 0) {
-        addPolygonToData(result, geom.coordinates[0]);
+      for (const polygon of geom.coordinates) {
+        addPolygonToData(result, polygon);
       }
     }
   }

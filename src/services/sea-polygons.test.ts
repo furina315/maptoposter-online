@@ -182,6 +182,53 @@ describe("sea polygon generation", () => {
     ).toBe(true);
   });
 
+  it("does not regenerate sea polygons when cached water is already merged", () => {
+    const waterGeo: FeatureCollection = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: { natural: "coastline" },
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [0, -2],
+              [0, 2],
+            ],
+          },
+        },
+        {
+          type: "Feature",
+          properties: { generated: "coastline-sea", natural: "sea" },
+          geometry: {
+            type: "Polygon",
+            coordinates: [
+              [
+                [-1, -1],
+                [0, -1],
+                [0, 1],
+                [-1, 1],
+                [-1, -1],
+              ],
+            ],
+          },
+        },
+      ],
+    };
+
+    const merged = mergeSeaPolygonsIntoWaterGeoJSON(waterGeo, {
+      centerLat: 0,
+      centerLng: 0.5,
+      baseRadiusMeters: 111_320,
+      aspectRatio: 1,
+    });
+
+    expect(merged).toBe(waterGeo);
+    expect(
+      merged.features.filter((feature) => feature.properties?.generated === "coastline-sea")
+    ).toHaveLength(1);
+  });
+
   it("builds viewport bbox using aspect ratio", () => {
     const bbox = buildViewportBbox({
       centerLat: 20,

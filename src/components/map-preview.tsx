@@ -1,6 +1,7 @@
 import { MapPosterPreview, type PosterSize } from "@/components/artistic-map";
 import { type Location } from "@/lib/types";
 import { m } from "@/paraglide/messages";
+import { useMemo } from "react";
 
 interface MapColors {
   bg: string;
@@ -17,24 +18,9 @@ interface MapColors {
   road_default: string;
 }
 
-interface StableTheme {
-  bg: string;
-  water: string;
-  parks: string;
-  road_motorway: string;
-  road_primary: string;
-  road_secondary: string;
-  road_tertiary: string;
-  road_residential: string;
-  road_default: string;
-  route: string;
-  poi: string;
-}
-
 interface MapPreviewProps {
   location: Location;
   selectedSize: PosterSize;
-  stableTheme: StableTheme;
   colors: MapColors;
   customFont: Uint8Array | null;
   baseRadius: number;
@@ -45,13 +31,29 @@ interface MapPreviewProps {
 export function MapPreview({
   location,
   selectedSize,
-  stableTheme,
   colors,
   customFont,
   baseRadius,
   customTitle,
   previewRef,
 }: MapPreviewProps) {
+  const previewTheme = useMemo(
+    () => ({
+      bg: colors.bg,
+      water: colors.water,
+      parks: colors.parks,
+      road_motorway: colors.road_motorway,
+      road_primary: colors.road_primary,
+      road_secondary: colors.road_secondary,
+      road_tertiary: colors.road_tertiary,
+      road_residential: colors.road_residential,
+      road_default: colors.road_default,
+      route: colors.poi_color || colors.text || colors.bg,
+      poi: colors.poi_color || colors.road_default,
+    }),
+    [colors]
+  );
+
   return (
     <div
       className="flex flex-col items-center justify-center p-8 relative overflow-hidden bg-card border-border md:h-full min-h-[400px]"
@@ -98,7 +100,7 @@ export function MapPreview({
             zoom={12}
             radius={baseRadius}
             poiDensity="dense"
-            theme={stableTheme}
+            theme={previewTheme}
             textColor={colors.text}
             gradientColor={colors.gradient_color}
             posterSize={selectedSize}

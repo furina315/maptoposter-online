@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useDeferredValue, useMemo } from "react";
+import { useState, useRef, useEffect, useDeferredValue } from "react";
 import { type PosterSize } from "@/components/artistic-map";
 import { Square, Smartphone, Monitor, FileImage } from "lucide-react";
 import { useLocationData } from "@/hooks/useLocationData";
@@ -42,6 +42,21 @@ interface RenderOptions {
   parks_bin: Float64Array;
   config_json: string;
   custom_font?: Uint8Array;
+}
+
+function formatTimingMs(duration: number): string {
+  return `${Math.round(duration)}ms`;
+}
+
+function logClientTiming(
+  scope: string,
+  name: string,
+  timings: Record<string, number | string | undefined>
+) {
+  const parts = Object.entries(timings)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${typeof value === "number" ? formatTimingMs(value) : value}`);
+  console.log(`[Timing][${scope}][${name}] ${parts.join(" ")}`);
 }
 
 // Example locations
@@ -92,7 +107,8 @@ function runInWorker(
   worker: Worker,
   type: WorkerTaskType,
   data: Float64Array | RenderOptions,
-  transfers: Transferable[] = []
+  transfers: Transferable[] = [],
+  label: string = type
 ): Promise<Float64Array | Uint8Array> {
   return new Promise((resolve, reject) => {
     const id = taskIdCounter++;
@@ -100,6 +116,11 @@ function runInWorker(
       if (event.data.id === id) {
         worker.removeEventListener("message", handler);
         if (event.data.success) {
+          if (typeof event.data.duration === "number") {
+            const scope = type === "render" ? "render" : "wasm";
+            const metric = type === "render" ? "total" : "duration";
+            logClientTiming(scope, label, { [metric]: event.data.duration });
+          }
           resolve(event.data.result);
         } else {
           reject(new Error(`Worker Protocol Error: ${event.data.error}`));
@@ -117,6 +138,50 @@ function runInWorker(
 
 const yieldMainThread = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 const FRONTEND_SCALE = 1;
+
+function parseCoordinate(value: number | string | undefined): number | null {
+  const parsed = typeof value === "number" ? value : parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseCityCoordinates(city: City | undefined): { lat: number; lng: number } | null {
+  if (!city) return null;
+
+  const lat = parseCoordinate(city.latitude);
+  const lng = parseCoordinate(city.longitude);
+  if (lat === null || lng === null) return null;
+
+  return { lat, lng };
+}
+
+function normalizeLocationName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getStateName(state: Pick<State, "name"> | string | undefined): string {
+  return typeof state === "string" ? state : state?.name || "";
+}
+
+function getStateIso2(state: Pick<State, "iso2"> | string | undefined): string {
+  return typeof state === "string" ? "" : state?.iso2?.toUpperCase() || "";
+}
+
+function namesReferToSameLocation(first: string, second: string): boolean {
+  const normalizedFirst = normalizeLocationName(first);
+  const normalizedSecond = normalizeLocationName(second);
+  if (!normalizedFirst || !normalizedSecond) return false;
+
+  return (
+    normalizedFirst === normalizedSecond ||
+    normalizedFirst.includes(normalizedSecond) ||
+    normalizedSecond.includes(normalizedFirst)
+  );
+}
 
 export default function MapPosterGenerator() {
   const {
@@ -237,6 +302,43 @@ export default function MapPosterGenerator() {
   const [isStatesLoading, setIsStatesLoading] = useState(false);
   const [isCitiesLoading, setIsCitiesLoading] = useState(false);
 
+  const resolveStandaloneRegionFallback = async (
+    countryName: string,
+    sourceState: Pick<State, "name" | "iso2"> | string | undefined
+  ): Promise<{ city: string; lat: number; lng: number } | null> => {
+    const stateName = getStateName(sourceState);
+    const stateIso = getStateIso2(sourceState);
+    if (!stateName || !stateIso) return null;
+
+    const sourceCountry = countries.find(
+      (country) => country.name.toLowerCase() === countryName.toLowerCase()
+    );
+    const standaloneCountry = countries.find(
+      (country) =>
+        country.iso2.toUpperCase() === stateIso &&
+        country.id !== sourceCountry?.id &&
+        namesReferToSameLocation(stateName, country.name)
+    );
+    if (!standaloneCountry) return null;
+
+    const standaloneStates = await getStatesByCountry(standaloneCountry.id);
+    const standaloneState =
+      standaloneStates.find((state) => state.iso2.toUpperCase() === stateIso) ||
+      standaloneStates.find((state) => namesReferToSameLocation(stateName, state.name)) ||
+      standaloneStates[0];
+    if (!standaloneState) return null;
+
+    const standaloneCities = await getCitiesByState(standaloneState.id);
+    const cityWithCoordinates = standaloneCities.find((city) => parseCityCoordinates(city));
+    const coordinates = parseCityCoordinates(cityWithCoordinates);
+    if (!coordinates) return null;
+
+    return {
+      city: stateName,
+      ...coordinates,
+    };
+  };
+
   // Font upload state
   const [customFont, setCustomFont] = useState<Uint8Array | null>(null);
   const [fontFileName, setFontFileName] = useState<string>("");
@@ -351,33 +453,25 @@ export default function MapPosterGenerator() {
                   setIsCitiesLoading(false);
 
                   if (config.selectedCity) {
-                    setSelectedCity(config.selectedCity);
-                    // 获取坐标（优先从城市数据获取）
                     const cityName = config.selectedCity;
-
-                    // 优先从城市数据中获取坐标（CDN 数据包含坐标）
-                    let lat = 0,
-                      lng = 0;
                     const city = stateCities.find(
                       (c: any) => c.name.toLowerCase() === cityName.toLowerCase()
                     );
-                    if (city && city.latitude && city.longitude) {
-                      lat =
-                        typeof city.latitude === "number"
-                          ? city.latitude
-                          : parseFloat(city.latitude as string) || 0;
-                      lng =
-                        typeof city.longitude === "number"
-                          ? city.longitude
-                          : parseFloat(city.longitude as string) || 0;
-                    }
+                    const coordinates = parseCityCoordinates(city);
+                    const fallback = coordinates
+                      ? null
+                      : await resolveStandaloneRegionFallback(config.selectedCountry, state);
+                    const resolvedCityName = fallback?.city || cityName;
+                    const resolvedCoordinates = coordinates || fallback || { lat: 0, lng: 0 };
+
+                    setSelectedCity(resolvedCityName);
 
                     setLocation({
                       country: config.selectedCountry,
                       state: config.selectedState,
-                      city: cityName,
-                      lat,
-                      lng,
+                      city: resolvedCityName,
+                      lat: resolvedCoordinates.lat,
+                      lng: resolvedCoordinates.lng,
                     });
                   }
                 }
@@ -546,23 +640,6 @@ export default function MapPosterGenerator() {
   const deferredCustomColors = useDeferredValue(customColors);
   const colors = useCustomColors ? deferredCustomColors : selectedTheme.colors;
 
-  const stableTheme = useMemo(
-    () => ({
-      bg: colors.bg,
-      water: colors.water,
-      parks: colors.parks,
-      road_motorway: colors.road_motorway,
-      road_primary: colors.road_primary,
-      road_secondary: colors.road_secondary,
-      road_tertiary: colors.road_tertiary,
-      road_residential: colors.road_residential,
-      road_default: colors.road_default,
-      route: colors.poi_color || colors.text || colors.bg,
-      poi: colors.poi_color || colors.road_default,
-    }),
-    [colors]
-  );
-
   const handleCountryChange = async (countryName: string) => {
     setSelectedCountry(countryName);
     setStates([]);
@@ -661,11 +738,16 @@ export default function MapPosterGenerator() {
             lng,
           });
         } else {
-          // No cities found, use state name as city
-          const cityName = stateName;
+          const fallback = await resolveStandaloneRegionFallback(selectedCountry, state);
+          const cityName = fallback?.city || stateName;
           setSelectedCity(cityName);
           setCities([]);
-          setLocation({ country: selectedCountry, state: state.name, city: cityName });
+          setLocation({
+            country: selectedCountry,
+            state: state.name,
+            city: cityName,
+            ...(fallback ? { lat: fallback.lat, lng: fallback.lng } : {}),
+          });
         }
       }
     } catch (error) {
@@ -677,9 +759,7 @@ export default function MapPosterGenerator() {
   const handleCityChange = async (cityName: string) => {
     setSelectedCity(cityName);
 
-    // 获取城市坐标
-    let lat = 0,
-      lng = 0;
+    let coordinates: { lat: number; lng: number } | null = null;
 
     // 首先尝试从已加载的城市数据中获取坐标（CDN 数据包含坐标）
     const state = states.find((s) => s.name.toLowerCase() === selectedState.toLowerCase());
@@ -687,22 +767,29 @@ export default function MapPosterGenerator() {
       try {
         const stateCities = await getCitiesByState(state.id);
         const city = stateCities.find((c: any) => c.name.toLowerCase() === cityName.toLowerCase());
-        if (city && city.latitude && city.longitude) {
-          lat =
-            typeof city.latitude === "number"
-              ? city.latitude
-              : parseFloat(city.latitude as string) || 0;
-          lng =
-            typeof city.longitude === "number"
-              ? city.longitude
-              : parseFloat(city.longitude as string) || 0;
-        }
+        coordinates = parseCityCoordinates(city);
       } catch (error) {
         console.error("Failed to get coordinates from city data:", error);
       }
     }
 
-    setLocation({ country: selectedCountry, state: selectedState, city: cityName, lat, lng });
+    const fallback = coordinates
+      ? null
+      : await resolveStandaloneRegionFallback(selectedCountry, state || selectedState);
+    const resolvedCityName = fallback?.city || cityName;
+    const resolvedCoordinates = coordinates || fallback || { lat: 0, lng: 0 };
+
+    if (resolvedCityName !== cityName) {
+      setSelectedCity(resolvedCityName);
+    }
+
+    setLocation({
+      country: selectedCountry,
+      state: selectedState,
+      city: resolvedCityName,
+      lat: resolvedCoordinates.lat,
+      lng: resolvedCoordinates.lng,
+    });
   };
 
   const handleFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -756,6 +843,7 @@ export default function MapPosterGenerator() {
   }, []);
 
   const handleDownload = async () => {
+    const generationStart = performance.now();
     setIsGenerating(true);
     setGenerationProgress(0);
     setGenerationStep(m.step_init());
@@ -811,6 +899,7 @@ export default function MapPosterGenerator() {
 
       // 获取地图数据 (包含 POI)
       // 下载范围使用固定的 canonical fetch viewport，避免同半径切换画幅时重新拉取数据。
+      const mapDataStart = performance.now();
       const mapResults = await mapDataService.getMapData(
         location.country,
         location.city,
@@ -821,22 +910,43 @@ export default function MapPosterGenerator() {
       );
 
       const { roads, water, parks, pois: poisRaw, fromCache, cacheLevel, isProtomaps } = mapResults;
+      logClientTiming("mapData", "getMapData", {
+        total: performance.now() - mapDataStart,
+        cacheLevel: cacheLevel ?? "unknown",
+        roads: roads.length.toString(),
+        water: water.length.toString(),
+        parks: parks.length.toString(),
+        pois: poisRaw.length.toString(),
+      });
 
       // 根据缓存层级设置最终消息
       if (cacheLevel === "memory") {
         setGenerationProgress(60);
         setGenerationStep(m.step_restore_memory());
+      } else if (fromCache) {
+        setGenerationProgress(60);
+        setGenerationStep(m.step_cache_restore_complete());
       } else {
         setGenerationProgress(60);
-        setGenerationStep(fromCache ? m.step_restore_cache() : m.step_fetch_complete());
+        setGenerationStep(m.step_fetch_complete());
       }
       await yieldMainThread();
 
-      setGenerationProgress(70);
-      setGenerationStep(m.step_processing());
+      setGenerationProgress(62);
+      setGenerationStep(m.step_sharding_roads());
       await yieldMainThread();
 
+      const shardStart = performance.now();
       const roadShards = shardRoadsBinary(roads, numWorkers);
+      logClientTiming("processing", "shardRoads", {
+        total: performance.now() - shardStart,
+        shards: roadShards.length.toString(),
+      });
+
+      setGenerationProgress(65);
+      setGenerationStep(m.step_wasm_processing());
+      await yieldMainThread();
+
       // 这里的 TypedArray 是之后会被 transfer 的
       const waterTyped = water;
       const parksTyped = parks;
@@ -845,22 +955,29 @@ export default function MapPosterGenerator() {
       // 并行处理：道路、水体、公园
       // 注意：使用取模确保索引永远在 workers 范围内
       const roadProcessingPromises = roadShards.map((shard, i) =>
-        runInWorker(workers[i % numWorkers], "roads", shard, [shard.buffer])
+        runInWorker(workers[i % numWorkers], "roads", shard, [shard.buffer], `roads_shard_${i + 1}`)
       );
 
+      const wasmProcessingStart = performance.now();
       const [processedRoadShards, waterBin, parksBin, poisBin] = await Promise.all([
         Promise.all(roadProcessingPromises),
-        runInWorker(workers[0 % numWorkers], "polygons", waterTyped, [waterTyped.buffer]),
-        runInWorker(workers[1 % numWorkers], "polygons", parksTyped, [parksTyped.buffer]),
-        runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer]),
+        runInWorker(workers[0 % numWorkers], "polygons", waterTyped, [waterTyped.buffer], "water"),
+        runInWorker(workers[1 % numWorkers], "polygons", parksTyped, [parksTyped.buffer], "parks"),
+        runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer], "pois"),
       ]);
+      logClientTiming("processing", "wasmAll", { total: performance.now() - wasmProcessingStart });
 
       // 数据处理完成
-      setGenerationProgress(70);
+      setGenerationProgress(82);
       setGenerationStep(m.step_processing_complete());
       await yieldMainThread();
 
+      setGenerationProgress(84);
+      setGenerationStep(m.step_prepare_render());
+      await yieldMainThread();
+
       // 准备渲染配置
+      const configStart = performance.now();
       const config = {
         center: { lat, lon: lng },
         radius: baseRadius,
@@ -875,6 +992,10 @@ export default function MapPosterGenerator() {
         road_width_boost: isProtomaps ? 1.8 : 1.0,
         pois: Array.from(poisBin),
       };
+      logClientTiming("processing", "prepareRenderConfig", {
+        total: performance.now() - configStart,
+        pois: poisBin.length.toString(),
+      });
 
       setGenerationProgress(90);
       setGenerationStep(m.step_rendering());
@@ -903,16 +1024,19 @@ export default function MapPosterGenerator() {
       }
 
       // 执行渲染任务
+      const renderStart = performance.now();
       const pngData = await runInWorker(
         workers[0 % numWorkers],
         "render",
         renderOptions,
-        finalTransfers
+        finalTransfers,
+        "poster"
       );
+      logClientTiming("render", "roundTrip", { total: performance.now() - renderStart });
 
       if (pngData) {
-        setGenerationProgress(100);
-        setGenerationStep(m.step_complete());
+        setGenerationProgress(97);
+        setGenerationStep(m.step_downloading_file());
         console.log(
           "[App] generationCompleteRef set to true, isGameOpen:",
           isGameOpen,
@@ -921,12 +1045,17 @@ export default function MapPosterGenerator() {
         generationCompleteRef.current = true;
         await yieldMainThread();
 
+        const downloadStart = performance.now();
         const blob = new Blob([pngData as BlobPart], { type: "image/png" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
         link.download = `${(customTitle || location.city).toLowerCase().replace(/\s+/g, "-")}-map-poster.png`;
         link.click();
+        logClientTiming("download", "file", { total: performance.now() - downloadStart });
+        logClientTiming("generation", "total", { total: performance.now() - generationStart });
+        setGenerationProgress(100);
+        setGenerationStep(m.step_complete());
       }
     } catch (error) {
       console.error(m.error_generating(), error);
@@ -1042,7 +1171,6 @@ export default function MapPosterGenerator() {
             <MapPreview
               location={location}
               selectedSize={selectedSize}
-              stableTheme={stableTheme}
               colors={colors}
               customFont={customFont}
               baseRadius={baseRadius}

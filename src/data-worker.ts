@@ -58,6 +58,17 @@ function sendProgress(progress: number, step: string) {
   (self as WorkerSelf).postMessage({ type: "PROGRESS", progress, step });
 }
 
+function formatMs(duration: number): string {
+  return `${Math.round(duration)}ms`;
+}
+
+function logTiming(scope: string, name: string, timings: Record<string, number | string | undefined>) {
+  const parts = Object.entries(timings)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${typeof value === "number" ? formatMs(value) : value}`);
+  console.log(`[Timing][${scope}][${name}] ${parts.join(" ")}`);
+}
+
 // 创建带基础进度的进度回调
 function createProgressCallback(
   baseProgress: number,
@@ -104,6 +115,132 @@ function createPOIsCacheKey(country: string, city: string, baseRadius: number) {
   return `map_data:${MAP_DATA_CACHE_VERSION}:${country}:${city}:${baseRadius}:pois`;
 }
 
+type MapDataType = "roads" | "water" | "parks" | "pois";
+
+function createCacheKey(
+  country: string,
+  city: string,
+  baseRadius: number,
+  lodMode: "simplified" | "detailed",
+  type: MapDataType
+) {
+  if (type === "pois") {
+    return createPOIsCacheKey(country, city, baseRadius);
+  }
+
+  return createMapDataCacheKey(country, city, baseRadius, lodMode, type);
+}
+
+async function restoreCachedType(
+  type: MapDataType,
+  blob: Blob,
+  context: {
+    lat: number;
+    lng: number;
+    baseRadius: number;
+    fetchViewportBbox: ReturnType<typeof buildCanonicalFetchViewportBbox>;
+    saveMergedWater?: (data: GeoJSON.FeatureCollection) => Promise<void>;
+  },
+  progress?: {
+    start: number;
+    span: number;
+  }
+) {
+  const report = (fraction: number, step: string) => {
+    if (!progress) return;
+    sendProgress(Math.round(progress.start + progress.span * fraction), step);
+  };
+
+  const totalStart = performance.now();
+
+  report(0, "step_cache_decompressing");
+  const decompressStart = performance.now();
+  const rawJson = await decompress(blob);
+  const decompressMs = performance.now() - decompressStart;
+
+  report(0.35, "step_cache_parsing");
+  const parseStart = performance.now();
+  const json = JSON.parse(rawJson) as GeoJSON.FeatureCollection;
+  const parseMs = performance.now() - parseStart;
+
+  let seaMergeMs: number | undefined;
+  let flattenMs = 0;
+  let result: Float64Array;
+  let cacheWriteBack = false;
+
+  if (type === "roads") {
+    report(0.75, "step_cache_flattening");
+    const flattenStart = performance.now();
+    result = flattenRoadsGeoJSON(json) as Float64Array;
+    flattenMs = performance.now() - flattenStart;
+  } else if (type === "water") {
+    report(0.55, "step_cache_merging_water");
+    const seaMergeStart = performance.now();
+    const mergedWaterJSON = mergeSeaPolygonsIntoWaterGeoJSON(json, {
+      centerLat: context.lat,
+      centerLng: context.lng,
+      baseRadiusMeters: context.baseRadius,
+      viewportBbox: context.fetchViewportBbox,
+    });
+    seaMergeMs = performance.now() - seaMergeStart;
+    if (mergedWaterJSON !== json && context.saveMergedWater) {
+      cacheWriteBack = true;
+      const writeBackStart = performance.now();
+      void context
+        .saveMergedWater(mergedWaterJSON)
+        .then(() => {
+          logTiming("cache", "waterWriteBack", { total: performance.now() - writeBackStart });
+        })
+        .catch((error) => {
+          console.warn("[DataWorker] Failed to write merged water cache", error);
+        });
+    }
+
+    report(0.8, "step_cache_flattening");
+    const flattenStart = performance.now();
+    result = flattenPolygonsGeoJSON(mergedWaterJSON) as Float64Array;
+    flattenMs = performance.now() - flattenStart;
+  } else if (type === "parks") {
+    report(0.75, "step_cache_flattening");
+    const flattenStart = performance.now();
+    result = flattenPolygonsGeoJSON(json) as Float64Array;
+    flattenMs = performance.now() - flattenStart;
+  } else {
+    report(0.75, "step_cache_flattening");
+    const flattenStart = performance.now();
+    result = flattenPOIsGeometry(json) as Float64Array;
+    flattenMs = performance.now() - flattenStart;
+  }
+
+  logTiming("cache", type, {
+    decompress: decompressMs,
+    parse: parseMs,
+    seaMerge: seaMergeMs,
+    writeBack: cacheWriteBack ? "scheduled" : undefined,
+    flatten: flattenMs,
+    total: performance.now() - totalStart,
+    features: json.features?.length?.toString(),
+    output: result.length.toString(),
+  });
+
+  return result;
+}
+
+async function saveFetchedType(
+  db: Awaited<ReturnType<typeof getDB>>,
+  country: string,
+  city: string,
+  baseRadius: number,
+  lodMode: "simplified" | "detailed",
+  type: MapDataType,
+  data: GeoJSON.FeatureCollection
+) {
+  const json = JSON.stringify(data);
+  const compressed = await compress(json);
+  const key = createCacheKey(country, city, baseRadius, lodMode, type);
+  await db.put(STORE_NAME, compressed, key);
+}
+
 self.onmessage = async (event: MessageEvent) => {
   const { id, type, payload } = event.data;
 
@@ -111,6 +248,7 @@ self.onmessage = async (event: MessageEvent) => {
     if (type === "GET_MAP_DATA") {
       const { country, city, lat, lng, baseRadius, lodMode } = payload;
       const db = await getDB();
+      sendProgress(11, "step_cache_checking");
       const fetchViewportBbox = buildCanonicalFetchViewportBbox({
         centerLat: lat,
         centerLng: lng,
@@ -127,60 +265,107 @@ self.onmessage = async (event: MessageEvent) => {
         fromCache: false,
       };
 
-      // 1. 检查 IndexedDB 缓存 (包含 POI)
-      const types = ["roads", "water", "parks"];
-      const cachedBlobs: Record<string, Blob | undefined> = {};
-      let allCached = true;
+      const types: MapDataType[] = ["roads", "water", "parks", "pois"];
+      const cachedBlobs: Partial<Record<MapDataType, Blob>> = {};
+      const missingTypes = new Set<MapDataType>();
 
-      for (const t of types) {
-        const key = createMapDataCacheKey(country, city, baseRadius, lodMode, t);
+      for (const mapType of types) {
+        const key = createCacheKey(country, city, baseRadius, lodMode, mapType);
         const blob = await db.get(STORE_NAME, key);
         if (blob) {
-          cachedBlobs[t] = blob;
+          cachedBlobs[mapType] = blob;
         } else {
-          allCached = false;
+          missingTypes.add(mapType);
         }
       }
 
-      // POI 缓存检查
-      const poisCacheKey = createPOIsCacheKey(country, city, baseRadius);
-      const poisCachedBlob = await db.get(STORE_NAME, poisCacheKey);
-      let poisCached = !!poisCachedBlob;
-
-      if (allCached && poisCached) {
+      if (missingTypes.size === 0) {
         console.log(`[DataWorker] Cache Hit: ${city}, ${country} (LOD: ${lodMode}) + POIs`);
-        // 发送缓存恢复进度
-        sendProgress(60, "step_restore_cache");
+        sendProgress(14, "step_cache_hit");
+        const cacheRestoreStart = performance.now();
+        const restoreContext = {
+          lat,
+          lng,
+          baseRadius,
+          fetchViewportBbox,
+          saveMergedWater: (data: GeoJSON.FeatureCollection) =>
+            saveFetchedType(db, country, city, baseRadius, lodMode, "water", data),
+        };
+        const restorePlan: Array<{ type: MapDataType; start: number; span: number }> = [
+          { type: "roads", start: 16, span: 10 },
+          { type: "water", start: 26, span: 20 },
+          { type: "parks", start: 46, span: 8 },
+          { type: "pois", start: 54, span: 5 },
+        ];
 
-        const [roadsJSON, waterJSON, parksJSON, poisJSON] = await Promise.all([
-          decompress(cachedBlobs["roads"]!).then(JSON.parse),
-          decompress(cachedBlobs["water"]!).then(JSON.parse),
-          decompress(cachedBlobs["parks"]!).then(JSON.parse),
-          decompress(poisCachedBlob!).then(JSON.parse),
-        ]);
+        for (const item of restorePlan) {
+          results[item.type] = (await restoreCachedType(
+            item.type,
+            cachedBlobs[item.type]!,
+            restoreContext,
+            {
+              start: item.start,
+              span: item.span,
+            }
+          )) as any;
+        }
 
-        results.roads = flattenRoadsGeoJSON(roadsJSON) as any;
-        const mergedWaterJSON = mergeSeaPolygonsIntoWaterGeoJSON(waterJSON, {
-          centerLat: lat,
-          centerLng: lng,
-          baseRadiusMeters: baseRadius,
-          viewportBbox: fetchViewportBbox,
-        });
-        results.water = flattenPolygonsGeoJSON(mergedWaterJSON) as any;
-        results.parks = flattenPolygonsGeoJSON(parksJSON) as any;
-        results.pois = flattenPOIsGeometry(poisJSON) as any;
+        sendProgress(60, "step_cache_restore_complete");
+        logTiming("cache", "all", { total: performance.now() - cacheRestoreStart });
         results.fromCache = true;
       } else {
-        let roadsGeo, waterGeo, parksGeo;
+        // 先恢复已命中的缓存，未命中的类型后续按顺序请求
+        const cachedRestoreTasks = (Object.entries(cachedBlobs) as [MapDataType, Blob][]).map(
+          async ([mapType, blob]) => {
+            const restored = await restoreCachedType(mapType, blob, {
+              lat,
+              lng,
+              baseRadius,
+              fetchViewportBbox,
+              saveMergedWater: (data: GeoJSON.FeatureCollection) =>
+                saveFetchedType(db, country, city, baseRadius, lodMode, "water", data),
+            });
+            results[mapType] = restored as any;
+          }
+        );
+        await Promise.all(cachedRestoreTasks);
+
+        let roadsGeo: GeoJSON.FeatureCollection | null = null;
+        let waterGeo: GeoJSON.FeatureCollection | null = null;
+        let parksGeo: GeoJSON.FeatureCollection | null = null;
+        let poisGeo: GeoJSON.FeatureCollection | null = null;
 
         if (USE_PROTOMAPS) {
           console.log(`[DataWorker] Cache Miss: ${city}. Fetching from Protomaps...`);
           sendProgress(5, "step_fetching_data");
           const protomapsData = await fetchFromProtomaps([lat, lng], fetchRadius);
           if (!protomapsData) throw new Error("Failed to fetch data from Protomaps");
-          roadsGeo = protomapsData.roads;
-          waterGeo = protomapsData.water;
-          parksGeo = protomapsData.landuse;
+          if (missingTypes.has("roads")) {
+            roadsGeo = protomapsData.roads;
+            results.roads = flattenRoadsGeoJSON(roadsGeo) as any;
+            await saveFetchedType(db, country, city, baseRadius, lodMode, "roads", roadsGeo);
+          }
+          if (missingTypes.has("water")) {
+            waterGeo = protomapsData.water;
+            const mergedWaterGeo = mergeSeaPolygonsIntoWaterGeoJSON(waterGeo, {
+              centerLat: lat,
+              centerLng: lng,
+              baseRadiusMeters: baseRadius,
+              viewportBbox: fetchViewportBbox,
+            });
+            results.water = flattenPolygonsGeoJSON(mergedWaterGeo) as any;
+            await saveFetchedType(db, country, city, baseRadius, lodMode, "water", mergedWaterGeo);
+          }
+          if (missingTypes.has("parks")) {
+            parksGeo = protomapsData.landuse;
+            results.parks = flattenPolygonsGeoJSON(parksGeo) as any;
+            await saveFetchedType(db, country, city, baseRadius, lodMode, "parks", parksGeo);
+          }
+          if (missingTypes.has("pois")) {
+            poisGeo = protomapsData.pois;
+            results.pois = flattenPOIsGeometry(poisGeo) as any;
+            await saveFetchedType(db, country, city, baseRadius, lodMode, "pois", poisGeo);
+          }
         } else if (USE_OVERPASS_CLIENT) {
           // [新库] 使用 overpass-client (串行请求，避免触发服务器并发限制)
           console.log(
@@ -188,48 +373,75 @@ self.onmessage = async (event: MessageEvent) => {
           );
 
           // 步骤1: 获取道路 (overpass-client 内部会处理 API 槽位检查和倒计时)
-          sendProgress(5, "step_fetching_roads");
-          roadsGeo = await fetchGraphOverpass(
-            fetchViewportPolygon,
-            baseRadius,
-            lodMode,
-            createProgressCallback(5, "step_fetching_roads")
-          );
+          if (missingTypes.has("roads")) {
+            sendProgress(5, "step_fetching_roads");
+            roadsGeo = await fetchGraphOverpass(
+              fetchViewportPolygon,
+              baseRadius,
+              lodMode,
+              createProgressCallback(5, "step_fetching_roads")
+            );
+            if (roadsGeo) {
+              results.roads = flattenRoadsGeoJSON(roadsGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "roads", roadsGeo);
+            }
+          }
 
           // 步骤2: 获取水体
-          sendProgress(15, "step_fetching_water");
-          waterGeo = await fetchFeaturesOverpass(
-            fetchViewportPolygon,
-            "water",
-            createProgressCallback(15, "step_fetching_water")
-          );
+          if (missingTypes.has("water")) {
+            sendProgress(15, "step_fetching_water");
+            waterGeo = await fetchFeaturesOverpass(
+              fetchViewportPolygon,
+              "water",
+              createProgressCallback(15, "step_fetching_water")
+            );
+            if (waterGeo) {
+              const mergedWaterGeo = mergeSeaPolygonsIntoWaterGeoJSON(waterGeo, {
+                centerLat: lat,
+                centerLng: lng,
+                baseRadiusMeters: baseRadius,
+                viewportBbox: fetchViewportBbox,
+              });
+              results.water = flattenPolygonsGeoJSON(mergedWaterGeo) as any;
+              await saveFetchedType(
+                db,
+                country,
+                city,
+                baseRadius,
+                lodMode,
+                "water",
+                mergedWaterGeo
+              );
+            }
+          }
 
           // 步骤3: 获取公园
-          sendProgress(25, "step_fetching_parks");
-          parksGeo = await fetchFeaturesOverpass(
-            fetchViewportPolygon,
-            "parks",
-            createProgressCallback(25, "step_fetching_parks")
-          );
+          if (missingTypes.has("parks")) {
+            sendProgress(25, "step_fetching_parks");
+            parksGeo = await fetchFeaturesOverpass(
+              fetchViewportPolygon,
+              "parks",
+              createProgressCallback(25, "step_fetching_parks")
+            );
+            if (parksGeo) {
+              results.parks = flattenPolygonsGeoJSON(parksGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "parks", parksGeo);
+            }
+          }
 
           // 步骤4: 获取POI
-          sendProgress(35, "step_fetching_pois");
+          if (missingTypes.has("pois")) {
+            sendProgress(35, "step_fetching_pois");
 
-          // 串行获取 POI (合并到 getMapData 中)
-          if (!poisCached) {
-            // 传入进度回调，overpass-client 内部会处理 API 槽位检查和倒计时
-            const poisGeo = await fetchPOIsOverpass(
+            // 串行获取 POI (合并到 getMapData 中)
+            poisGeo = await fetchPOIsOverpass(
               fetchViewportPolygon,
               createProgressCallback(40, "step_fetching_pois")
             );
             if (poisGeo) {
-              const compressed = await compress(JSON.stringify(poisGeo));
-              await db.put(STORE_NAME, compressed, poisCacheKey);
               results.pois = flattenPOIsGeometry(poisGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "pois", poisGeo);
             }
-          } else {
-            const poisJSON = await decompress(poisCachedBlob!).then(JSON.parse);
-            results.pois = flattenPOIsGeometry(poisJSON) as any;
           }
 
           sendProgress(60, "step_fetch_complete");
@@ -238,10 +450,18 @@ self.onmessage = async (event: MessageEvent) => {
           console.log(
             `[DataWorker] Cache Miss: ${city}. Fetching from OSM (Parallel) with LOD: ${lodMode}...`
           );
-          sendProgress(10, "step_fetching_roads");
-          const fetched = await Promise.all([
-            fetchGraph([lat, lng], fetchRadius, lodMode),
-            fetchFeatures(
+          if (missingTypes.has("roads")) {
+            sendProgress(10, "step_fetching_roads");
+            roadsGeo = await fetchGraph([lat, lng], fetchRadius, lodMode);
+            if (roadsGeo) {
+              results.roads = flattenRoadsGeoJSON(roadsGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "roads", roadsGeo);
+            }
+          }
+
+          if (missingTypes.has("water")) {
+            sendProgress(15, "step_fetching_water");
+            waterGeo = await fetchFeatures(
               [lat, lng],
               fetchRadius,
               {
@@ -250,8 +470,30 @@ self.onmessage = async (event: MessageEvent) => {
                 landuse: ["reservoir"],
               },
               "water"
-            ),
-            fetchFeatures(
+            );
+            if (waterGeo) {
+              const mergedWaterGeo = mergeSeaPolygonsIntoWaterGeoJSON(waterGeo, {
+                centerLat: lat,
+                centerLng: lng,
+                baseRadiusMeters: baseRadius,
+                viewportBbox: fetchViewportBbox,
+              });
+              results.water = flattenPolygonsGeoJSON(mergedWaterGeo) as any;
+              await saveFetchedType(
+                db,
+                country,
+                city,
+                baseRadius,
+                lodMode,
+                "water",
+                mergedWaterGeo
+              );
+            }
+          }
+
+          if (missingTypes.has("parks")) {
+            sendProgress(25, "step_fetching_parks");
+            parksGeo = await fetchFeatures(
               [lat, lng],
               fetchRadius,
               {
@@ -260,55 +502,34 @@ self.onmessage = async (event: MessageEvent) => {
                 natural: ["wood", "scrub"],
               },
               "parks"
-            ),
-          ]);
-          roadsGeo = fetched[0];
-          waterGeo = fetched[1];
-          parksGeo = fetched[2];
+            );
+            if (parksGeo) {
+              results.parks = flattenPolygonsGeoJSON(parksGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "parks", parksGeo);
+            }
+          }
 
           // 串行获取 POI (合并到 getMapData 中)
-          sendProgress(35, "step_fetching_pois");
-          if (!poisCached) {
-            const poisGeo = await fetchPOIs([lat, lng], fetchRadius);
+          if (missingTypes.has("pois")) {
+            sendProgress(35, "step_fetching_pois");
+            poisGeo = await fetchPOIs([lat, lng], fetchRadius);
             if (poisGeo) {
-              const compressed = await compress(JSON.stringify(poisGeo));
-              await db.put(STORE_NAME, compressed, poisCacheKey);
               results.pois = flattenPOIsGeometry(poisGeo) as any;
+              await saveFetchedType(db, country, city, baseRadius, lodMode, "pois", poisGeo);
             }
-          } else {
-            const poisJSON = await decompress(poisCachedBlob!).then(JSON.parse);
-            results.pois = flattenPOIsGeometry(poisJSON) as any;
           }
 
           sendProgress(60, "step_fetch_complete");
         }
 
-        if (!roadsGeo || !waterGeo || !parksGeo) {
+        if (
+          (missingTypes.has("roads") && !roadsGeo) ||
+          (missingTypes.has("water") && !waterGeo) ||
+          (missingTypes.has("parks") && !parksGeo) ||
+          (missingTypes.has("pois") && !poisGeo)
+        ) {
           throw new Error("Failed to fetch data from remote source");
         }
-
-        results.roads = flattenRoadsGeoJSON(roadsGeo) as any;
-        const mergedWaterGeo = mergeSeaPolygonsIntoWaterGeoJSON(waterGeo, {
-          centerLat: lat,
-          centerLng: lng,
-          baseRadiusMeters: baseRadius,
-          viewportBbox: fetchViewportBbox,
-        });
-        results.water = flattenPolygonsGeoJSON(mergedWaterGeo) as any;
-        results.parks = flattenPolygonsGeoJSON(parksGeo) as any;
-
-        // 异步存入库 (不包含 POI，因为已经同步存入)
-        const saveTasks = [
-          { type: "roads", data: roadsGeo },
-          { type: "water", data: waterGeo },
-          { type: "parks", data: parksGeo },
-        ].map(async ({ type: t, data }) => {
-          const json = JSON.stringify(data);
-          const compressed = await compress(json);
-          const key = createMapDataCacheKey(country, city, baseRadius, lodMode, t);
-          return db.put(STORE_NAME, compressed, key);
-        });
-        await Promise.all(saveTasks);
       }
 
       // 4. 返回结果 (包含 POI)
