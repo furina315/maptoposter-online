@@ -4,16 +4,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Palette } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, isValidHexColor } from "@/lib/utils";
 import { MAP_THEMES, type MapColors, type MapTheme } from "@/lib/types";
 import * as m from "@/paraglide/messages";
 import { memo, useEffect, useState } from "react";
 
 type ColorKey = keyof MapColors;
-
-function isValidHexColor(color: string): boolean {
-  return /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(color);
-}
 
 interface ColorKeyDef {
   key: ColorKey;
@@ -37,13 +33,13 @@ interface ClipboardColorJson {
   };
 }
 
-function isClipboardColorJson(value: unknown): value is ClipboardColorJson {
-  if (!value || typeof value !== "object") return false;
+function validateClipboardColorJson(value: unknown): { valid: boolean; invalidFields: string[] } {
+  if (!value || typeof value !== "object") return { valid: false, invalidFields: [] };
 
   const json = value as Record<string, unknown>;
   const roads = json.roads;
 
-  if (!roads || typeof roads !== "object") return false;
+  if (!roads || typeof roads !== "object") return { valid: false, invalidFields: [] };
 
   const requiredStringFields = [
     "background",
@@ -62,12 +58,27 @@ function isClipboardColorJson(value: unknown): value is ClipboardColorJson {
     "other",
   ] as const;
 
-  return (
-    requiredStringFields.every((field) => typeof json[field] === "string") &&
-    requiredRoadFields.every(
-      (field) => typeof (roads as Record<string, unknown>)[field] === "string"
-    )
-  );
+  const invalidFields: string[] = [];
+
+  for (const field of requiredStringFields) {
+    const val = json[field];
+    if (typeof val !== "string") {
+      invalidFields.push(field);
+    } else if (!isValidHexColor(val)) {
+      invalidFields.push(field);
+    }
+  }
+
+  for (const field of requiredRoadFields) {
+    const val = (roads as Record<string, unknown>)[field];
+    if (typeof val !== "string") {
+      invalidFields.push(`roads.${field}`);
+    } else if (!isValidHexColor(val)) {
+      invalidFields.push(`roads.${field}`);
+    }
+  }
+
+  return { valid: invalidFields.length === 0, invalidFields };
 }
 
 // ─── 独立的颜色行组件，内部维护本地 state，避免拖动时触发父组件重渲染 ───
@@ -158,7 +169,8 @@ export function ThemeColors({
   onUseCustomColorsChange,
 }: ThemeColorsProps) {
   const [isImporting, setIsImporting] = useState(false);
-  const showClipboardImport = import.meta.env.DEV;
+  const [copied, setCopied] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const colorKeys: ColorKeyDef[] = [
     { key: "bg", label: m.color_bg() },
@@ -179,20 +191,54 @@ export function ThemeColors({
     onCustomColorsChange({ ...customColors, [key]: val });
   };
 
+  const handleCopyColors = async () => {
+    const json: ClipboardColorJson = {
+      background: customColors.bg,
+      text: customColors.text,
+      mask_gradient: customColors.gradient_color,
+      water: customColors.water,
+      park_greenery: customColors.parks,
+      poi: customColors.poi_color,
+      roads: {
+        highway: customColors.road_motorway,
+        primary: customColors.road_primary,
+        secondary: customColors.road_secondary,
+        tertiary: customColors.road_tertiary,
+        residential: customColors.road_residential,
+        other: customColors.road_default,
+      },
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(json, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy colors:", error);
+    }
+  };
+
   const handlePasteFromClipboard = async () => {
     if (!navigator.clipboard?.readText) {
-      alert("当前浏览器不支持读取剪贴板。");
+      setImportError(m.clipboard_not_supported());
       return;
     }
 
     setIsImporting(true);
+    setImportError(null);
 
     try {
       const text = await navigator.clipboard.readText();
       const parsed = JSON.parse(text);
 
-      if (!isClipboardColorJson(parsed)) {
-        alert("剪贴板里的配色 JSON 格式不正确。");
+      const { valid, invalidFields } = validateClipboardColorJson(parsed);
+
+      if (!valid && invalidFields.length === 0) {
+        setImportError(m.paste_json_invalid_format());
+        return;
+      }
+
+      if (!valid) {
+        setImportError(m.invalid_color_in_json({ field: invalidFields.join(", ") }));
         return;
       }
 
@@ -213,7 +259,7 @@ export function ThemeColors({
       onUseCustomColorsChange(true);
     } catch (error) {
       console.error("Failed to import colors from clipboard:", error);
-      alert("读取剪贴板失败，或 JSON 解析失败。");
+      setImportError(m.clipboard_read_failed());
     } finally {
       setIsImporting(false);
     }
@@ -280,17 +326,26 @@ export function ThemeColors({
         </TabsContent>
 
         <TabsContent value="custom" className="mt-3">
-          {showClipboardImport ? (
-            <div className="mb-3 flex justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handlePasteFromClipboard}
-                disabled={isImporting}
-              >
-                {isImporting ? "导入中..." : "从剪贴板导入配色"}
-              </Button>
-            </div>
+          <div className="mb-3 flex flex-wrap justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCopyColors}
+              disabled={isImporting}
+            >
+              {copied ? m.colors_copied() : m.copy_colors_button()}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handlePasteFromClipboard}
+              disabled={isImporting}
+            >
+              {isImporting ? m.importing() : m.import_colors_button()}
+            </Button>
+          </div>
+          {importError ? (
+            <div className="mb-3 text-xs text-red-500">{importError}</div>
           ) : null}
           <div className="space-y-4 pr-2 custom-scrollbar pt-1">
             {colorKeys.map(({ key, label }) => (

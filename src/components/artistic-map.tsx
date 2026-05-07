@@ -9,10 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-
-function isValidHexColor(color: string): boolean {
-  return /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(color);
-}
+import { isValidHexColor } from "@/lib/utils";
 
 // ============================================
 // 类型定义
