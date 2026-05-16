@@ -7,7 +7,7 @@
 import type { Country, State, City, LocationServiceState } from "./location-types";
 
 const CDN_BASE =
-  "https://cdn.jsdelivr.net/gh/ianho7/location-data-slim@fb7e200f659ed17f8af3ae911dfda78a4deb07a2";
+  "https://cdn.jsdelivr.net/gh/ianho7/location-data-slim@f35713abe5833b213dc953fe82d4e9d6fb3fe197";
 
 const DATA_URLS = {
   countries: `${CDN_BASE}/countries.json`,
@@ -205,6 +205,7 @@ export class LocationService {
           stateCode: c.s,
         }));
 
+        cities.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
         this.citiesCache[targetCountryIso2] = cities;
         return cities.filter((c) => c.state_id === stateId);
       }
