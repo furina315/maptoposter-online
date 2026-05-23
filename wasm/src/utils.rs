@@ -16,20 +16,37 @@ unsafe extern "C" {
     pub fn performance_now() -> f64;
 }
 
-/// 解析 hex 颜色为 tiny-skia Color
+/// 解析 hex 颜色为 tiny-skia Color，支持透明/半透明
+///
+/// 支持格式：#RGB, #RRGGBB, #RRGGBBAA
+/// 3 字符 hex 自动展开；8 字符 hex 末两位为 alpha
 pub fn parse_hex_color(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
 
-    if hex.len() != 6 {
-        // 默认黑色
-        return Color::from_rgba8(0, 0, 0, 255);
+    match hex.len() {
+        3 => {
+            // #RGB → #RRGGBB
+            let r = u8::from_str_radix(&hex[0..1], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[1..2], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[2..3], 16).unwrap_or(0);
+            Color::from_rgba8(r * 17, g * 17, b * 17, 255)
+        }
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            Color::from_rgba8(r, g, b, 255)
+        }
+        8 => {
+            // #RRGGBBAA 含 alpha 通道，支持透明/半透明
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            let a = u8::from_str_radix(&hex[6..8], 16).unwrap_or(255);
+            Color::from_rgba8(r, g, b, a)
+        }
+        _ => Color::from_rgba8(0, 0, 0, 255), // 非法长度 → 默认黑色
     }
-
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-
-    Color::from_rgba8(r, g, b, 255)
 }
 
 /// 检测是否为拉丁文字（与 Python 版本相同逻辑）
@@ -97,8 +114,21 @@ mod tests {
 
     #[test]
     fn test_parse_hex_color() {
+        // 6 字符 hex
         let color = parse_hex_color("#FF5733");
         assert_eq!(color, Color::from_rgba8(255, 87, 51, 255));
+        // 3 字符 hex 展开
+        let color3 = parse_hex_color("#F53");
+        assert_eq!(color3, Color::from_rgba8(0xFF, 0x55, 0x33, 255));
+        // 8 字符 hex 含 alpha
+        let color8a = parse_hex_color("#FF573380");
+        assert_eq!(color8a, Color::from_rgba8(255, 87, 51, 128));
+        // 8 字符 hex 全透明
+        let trans = parse_hex_color("#00000000");
+        assert_eq!(trans, Color::from_rgba8(0, 0, 0, 0));
+        // 非法长度 → 回退黑色
+        let invalid = parse_hex_color("#12");
+        assert_eq!(invalid, Color::from_rgba8(0, 0, 0, 255));
     }
 
     #[test]
