@@ -274,7 +274,10 @@ self.onmessage = async (event: MessageEvent) => {
         fromCache: false,
       };
 
-      const types: MapDataType[] = ["roads", "water", "parks", "pois"];
+      // skipPois: 用户关闭 POI 渲染时跳过 POI 缓存检查和网络请求，节省带宽
+      const types: MapDataType[] = payload.skipPois
+        ? ["roads", "water", "parks"]
+        : ["roads", "water", "parks", "pois"];
       const cachedBlobs: Partial<Record<MapDataType, Blob>> = {};
       const missingTypes = new Set<MapDataType>();
 
@@ -290,7 +293,7 @@ self.onmessage = async (event: MessageEvent) => {
 
       if (missingTypes.size === 0) {
         console.log(
-          `[DataWorker] Cache Hit: ${city}, ${country}${district ? ` > ${district}` : ""} (LOD: ${lodMode}) + POIs`
+          `[DataWorker] Cache Hit: ${city}, ${country}${district ? ` > ${district}` : ""} (LOD: ${lodMode})${payload.skipPois ? "" : " + POIs"}`
         );
         sendProgress(14, "step_cache_hit");
         const cacheRestoreStart = performance.now();
@@ -302,12 +305,16 @@ self.onmessage = async (event: MessageEvent) => {
           saveMergedWater: (data: GeoJSON.FeatureCollection) =>
             saveFetchedType(db, country, city, baseRadius, lodMode, "water", data, district),
         };
-        const restorePlan: Array<{ type: MapDataType; start: number; span: number }> = [
+        // skipPois 时跳过 POI 恢复，避免 cachedBlobs["pois"] 为 undefined 导致报错
+        const baseRestorePlan: Array<{ type: MapDataType; start: number; span: number }> = [
           { type: "roads", start: 16, span: 10 },
           { type: "water", start: 26, span: 20 },
           { type: "parks", start: 46, span: 8 },
-          { type: "pois", start: 54, span: 5 },
         ];
+        const poiPlan = payload.skipPois
+          ? []
+          : [{ type: "pois" as MapDataType, start: 54, span: 5 }];
+        const restorePlan = [...baseRestorePlan, ...poiPlan];
 
         for (const item of restorePlan) {
           results[item.type] = (await restoreCachedType(

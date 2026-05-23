@@ -1,6 +1,5 @@
 import { MapPosterPreview, type PosterSize } from "@/components/artistic-map";
 import { type Location } from "@/lib/types";
-// import { m } from "@/paraglide/messages";
 
 interface MapColors {
   bg: string;
@@ -90,11 +89,6 @@ export function MapPreview({
           backgroundSize: "20px 20px",
         }}
       />
-      {/* <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full pointer-events-none select-none">
-        <span className="text-xs tracking-wide text-white font-light whitespace-nowrap text-shadow-sm">
-          {m.preview_actual_result()}
-        </span>
-      </div> */}
       <div
         ref={previewRef}
         className="flex items-center justify-center relative transition-all duration-300 ease-in-out w-full h-full p-4"

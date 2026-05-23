@@ -8,7 +8,7 @@ import {
   MapPin,
   Settings2,
   Palette,
-  Type,
+  Eye,
   FileText,
   Scaling,
 } from "lucide-react";
@@ -36,7 +36,7 @@ import { LocationSettings } from "./components/location-settings";
 import { DataSettings } from "./components/data-settings";
 import { ThemeColors } from "./components/theme-colors";
 import { FontSettings } from "./components/font-settings";
-import { TextDisplaySettings } from "./components/text-display-settings";
+import { RenderControlSettings } from "./components/render-control-settings";
 import { PosterSizeSelector } from "./components/poster-size-selector";
 import { MapPreview } from "./components/map-preview";
 import { GenerationModal } from "./components/generation-modal";
@@ -383,6 +383,7 @@ export default function MapPosterGenerator() {
   const [showCoords, setShowCoords] = useState(true);
   const [showCity, setShowCity] = useState(true);
   const [showCountry, setShowCountry] = useState(true);
+  const [showPois, setShowPois] = useState(false); // 地图元素渲染：POI 兴趣点
 
   // Persistence Handling
   const isRestored = useRef(false);
@@ -437,6 +438,7 @@ export default function MapPosterGenerator() {
       showCoords,
       showCity,
       showCountry,
+      showPois,
     };
     localStorage.setItem("maptoposter_config", JSON.stringify(config));
   }, [
@@ -452,6 +454,7 @@ export default function MapPosterGenerator() {
     showCoords,
     showCity,
     showCountry,
+    showPois,
   ]);
 
   useEffect(() => {
@@ -471,6 +474,7 @@ export default function MapPosterGenerator() {
         if (typeof config.showCoords === "boolean") setShowCoords(config.showCoords);
         if (typeof config.showCity === "boolean") setShowCity(config.showCity);
         if (typeof config.showCountry === "boolean") setShowCountry(config.showCountry);
+        if (typeof config.showPois === "boolean") setShowPois(config.showPois);
 
         // Restore Location Text/Coords
         if (config.customTitle) setCustomTitle(config.customTitle);
@@ -1039,6 +1043,7 @@ export default function MapPosterGenerator() {
       // 获取地图数据 (包含 POI)
       // 下载范围使用固定的 canonical fetch viewport，避免同半径切换画幅时重新拉取数据。
       const mapDataStart = performance.now();
+      // skipPois: 用户关闭 POI 渲染时跳过 Overpass 请求和缓存检查，节省带宽与时间
       const mapResults = await mapDataService.getMapData(
         location.country,
         location.city,
@@ -1046,7 +1051,8 @@ export default function MapPosterGenerator() {
         lng,
         baseRadius,
         lodMode,
-        location.district
+        location.district,
+        !showPois // skipPois
       );
 
       const { roads, water, parks, pois: poisRaw, fromCache, cacheLevel, isProtomaps } = mapResults;
@@ -1099,12 +1105,16 @@ export default function MapPosterGenerator() {
       );
 
       const wasmProcessingStart = performance.now();
-      const [processedRoadShards, waterBin, parksBin, poisBin] = await Promise.all([
+      // 道路、水体、公园并行处理；POI 按用户开关决定是否参与 worker 处理
+      const [processedRoadShards, waterBin, parksBin] = await Promise.all([
         Promise.all(roadProcessingPromises),
         runInWorker(workers[0 % numWorkers], "polygons", waterTyped, [waterTyped.buffer], "water"),
         runInWorker(workers[1 % numWorkers], "polygons", parksTyped, [parksTyped.buffer], "parks"),
-        runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer], "pois"),
       ]);
+      // 用户关闭 POI 时跳过 worker 处理，直接构造空数组（WASM 会跳过渲染）
+      const poisBin = showPois
+        ? await runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer], "pois")
+        : new Float64Array([0]);
       logClientTiming("processing", "wasmAll", { total: performance.now() - wasmProcessingStart });
 
       // 数据处理完成
@@ -1131,7 +1141,8 @@ export default function MapPosterGenerator() {
         selected_size_height: selectedSize.height * FRONTEND_SCALE,
         frontend_scale: FRONTEND_SCALE,
         road_width_boost: isProtomaps ? 1.8 : 1.0,
-        pois: Array.from(poisBin),
+        // 用户关闭 POI 时不传 pois 字段，WASM 端 #[serde(default)] 自动为 None
+        ...(showPois ? { pois: Array.from(poisBin) } : {}),
         show_coords: showCoords,
         show_city: showCity,
         show_country: showCountry,
@@ -1157,7 +1168,8 @@ export default function MapPosterGenerator() {
         ...processedRoadShards.map((s) => s.buffer),
         waterBin.buffer,
         parksBin.buffer,
-        poisBin.buffer,
+        // 空 POI 数组无 buffer 可 transfer，仅当用户开启 POI 时加入传输列表
+        ...(showPois && poisBin.length > 1 ? [poisBin.buffer] : []),
       ];
 
       // 从缓存直接取字体数据，与预览状态解耦
@@ -1239,8 +1251,8 @@ export default function MapPosterGenerator() {
       },
       {
         id: "section-text-display",
-        icon: <Type className="w-5 h-5" />,
-        label: m.text_display_toggles(),
+        icon: <Eye className="w-5 h-5" />,
+        label: m.render_control(),
       },
       {
         id: "section-font-settings",
@@ -1288,7 +1300,7 @@ export default function MapPosterGenerator() {
         />
 
         <main className="flex-1 overflow-auto custom-scrollbar w-full mx-auto px-4 py-6">
-          <div className="grid md:grid-cols-[480px_1fr] px-0 md:px-20 gap-8 md:h-full">
+          <div className="relative grid md:grid-cols-[480px_1fr] px-0 md:px-20 gap-8 md:h-full">
             <div className="flex flex-row gap-8 md:min-h-0">
               <ConfigNav
                 sections={navSections}
@@ -1352,13 +1364,15 @@ export default function MapPosterGenerator() {
                 </div>
 
                 <div id="section-text-display" ref={setSectionRef("section-text-display")}>
-                  <TextDisplaySettings
+                  <RenderControlSettings
                     showCoords={showCoords}
                     showCity={showCity}
                     showCountry={showCountry}
+                    showPois={showPois}
                     onShowCoordsChange={setShowCoords}
                     onShowCityChange={setShowCity}
                     onShowCountryChange={setShowCountry}
+                    onShowPoisChange={setShowPois}
                   />
                 </div>
 
@@ -1406,6 +1420,11 @@ export default function MapPosterGenerator() {
                 handleCoordinateReverseGeocode(loc.lat, loc.lon);
               }}
             />
+            <div className="absolute top-3 right-23 z-10 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full pointer-events-none select-none">
+              <span className="text-xs tracking-wide text-white font-light whitespace-nowrap text-shadow-sm">
+                {m.preview_actual_result()}
+              </span>
+            </div>
           </div>
           <PosterGallery />
           <Footer activeLang={activeLang} />

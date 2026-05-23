@@ -68,7 +68,7 @@ export function LocationSettings({
 }: LocationSettingsProps) {
   return (
     <Card className="p-4 bg-card border-border">
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2">
         <MapPin className="w-4 h-4 text-primary" />
         <h2 className="text-lg text-foreground">{m.location()}</h2>
       </div>

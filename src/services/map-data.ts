@@ -70,11 +70,14 @@ class MapDataService {
     lng: number,
     baseRadius: number,
     lodMode: "simplified" | "detailed" = "simplified",
-    district?: string
+    district?: string,
+    skipPois?: boolean
   ): Promise<MapData> {
     // district 不等于 city 时才加入 key，保证城市级缓存仍可命中旧数据
     const districtPart = district && district !== city ? `:${district}` : "";
-    const cacheKey = `${MAP_DATA_CACHE_VERSION}:${country}:${city}${districtPart}:${baseRadius}:${lodMode}`;
+    // L1 内存缓存 key 追加 skipPois 标识，防止无 POI 的缓存污染有 POI 的缓存
+    const poiPart = skipPois ? ":nopois" : "";
+    const cacheKey = `${MAP_DATA_CACHE_VERSION}:${country}:${city}${districtPart}:${baseRadius}:${lodMode}${poiPart}`;
 
     // 1. 尝试 L1 内存缓存
     if (this.memoryCache.has(cacheKey)) {
@@ -105,7 +108,7 @@ class MapDataService {
     this.worker.postMessage({
       id,
       type: "GET_MAP_DATA",
-      payload: { country, city, lat, lng, baseRadius, lodMode, district },
+      payload: { country, city, lat, lng, baseRadius, lodMode, district, skipPois },
     });
 
     const result = await promise;
