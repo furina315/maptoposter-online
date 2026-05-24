@@ -27,7 +27,7 @@ const languageNames: Record<AvailableLanguageTag, string> = {
 interface AppHeaderProps {
   activeLang: AvailableLanguageTag;
   onLangChange: (lang: AvailableLanguageTag) => void;
-  onDownload: () => void;
+  onDownload: (scale: number) => void;
   isGenerating: boolean;
   locationLoading: boolean;
 }
@@ -40,6 +40,7 @@ export function AppHeader({
   locationLoading,
 }: AppHeaderProps) {
   const [supportOpen, setSupportOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false); // 移动端点击展开画质菜单
   const [starTarget, setStarTarget] = useState<number | null>(null);
   const localeOptions = { locale: activeLang };
 
@@ -85,26 +86,71 @@ export function AppHeader({
               ))}
             </SelectContent>
           </Select>
-          <Button
-            onClick={onDownload}
-            disabled={isGenerating || locationLoading}
-            className="gap-1 sm:gap-2 bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
-            data-ai-action="download-poster"
-            aria-label={
-              isGenerating ? m.generating({}, localeOptions) : m.download_button({}, localeOptions)
-            }
-          >
-            {isGenerating ? (
-              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Download className="w-4 h-4" aria-hidden="true" />
-            )}
-            <span className="hidden sm:inline">
-              {isGenerating
-                ? m.generating({}, localeOptions)
-                : m.download_button({}, localeOptions)}
-            </span>
-          </Button>
+          {/* 下载按钮 + 画质选择下拉菜单 */}
+          <div className="relative group">
+            <Button
+              disabled={isGenerating || locationLoading}
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="gap-1 sm:gap-2 bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+              data-ai-action="download-poster"
+              aria-label={
+                isGenerating
+                  ? m.generating({}, localeOptions)
+                  : m.download_button({}, localeOptions)
+              }
+            >
+              {isGenerating ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span className="hidden sm:inline">
+                {isGenerating
+                  ? m.generating({}, localeOptions)
+                  : m.download_button({}, localeOptions)}
+              </span>
+            </Button>
+            {/* hover/click 时弹出的画质选择菜单 */}
+            <div
+              className={[
+                "absolute right-0 top-full mt-1 z-50 min-w-[300px] bg-background border border-border shadow-lg transition-all duration-200",
+                menuOpen
+                  ? "opacity-100 visible"
+                  : "opacity-0 invisible group-hover:opacity-100 group-hover:visible",
+              ].join(" ")}
+            >
+              {/* 1X 选项 */}
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDownload(1);
+                }}
+                className="w-full flex flex-col items-start gap-0.5 px-3 py-3 text-foreground hover:bg-primary hover:text-vanilla transition-colors cursor-pointer text-left"
+              >
+                <span className="text-sm font-semibold">
+                  1X ({m.recommended({}, localeOptions)})
+                </span>
+                <span className="text-[12px] leading-tight">
+                  {m.download_quality_1x_desc({}, localeOptions)}
+                </span>
+              </button>
+              {/* 分隔线 */}
+              {/* <div className="mx-3 h-px bg-border" /> */}
+              {/* 2X 选项 */}
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDownload(2);
+                }}
+                className="w-full flex flex-col items-start gap-0.5 px-3 py-3 text-foreground hover:bg-primary hover:text-vanilla transition-colors cursor-pointer text-left"
+              >
+                <span className="text-sm font-semibold">2X</span>
+                <span className="text-[12px] leading-tight">
+                  {m.download_quality_2x_desc({}, localeOptions)}
+                </span>
+              </button>
+            </div>
+          </div>
           <Button
             onClick={() => setSupportOpen(true)}
             className="gap-1 sm:gap-2 bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"

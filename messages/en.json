@@ -183,5 +183,8 @@
   "support_buy_me_a_coffee_desc": "Credit Card / Apple Pay / Google Pay",
   "support_afdian": "Afdian (爱发电)",
   "support_afdian_desc": "WeChat / Alipay",
-  "star_hint": "Drop a Star 🥰 let's hit {target}!"
+  "star_hint": "Drop a Star 🥰 let's hit {target}!",
+  "download_quality_1x_desc": "Social sharing, wallpapers, online display, content illustration",
+  "download_quality_2x_desc": "High-res printing, HiDPI wallpapers, ultimate visual experience, processing time is 2.5× more than 1X",
+  "recommended": "Recommended"
 }

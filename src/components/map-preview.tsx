@@ -33,6 +33,8 @@ interface MapPreviewProps {
   showCity: boolean;
   showCountry: boolean;
   previewRef: React.RefObject<HTMLDivElement | null>;
+  /** 预览区底部提示文字，由父组件传 i18n 文案，避免 MapPreview 订阅 paraglide 导致切语言时重渲染 canvas */
+  previewHint?: string;
   interactive?: boolean;
   onMove?: (location: MapLocation) => void;
   onMoveEnd?: (location: MapLocation) => void;
@@ -50,6 +52,7 @@ export function MapPreview({
   showCity,
   showCountry,
   previewRef,
+  previewHint,
   interactive = false,
   onMove,
   onMoveEnd,
@@ -128,6 +131,11 @@ export function MapPreview({
           />
         </div>
       </div>
+      {previewHint ? (
+        <p className="text-xs tracking-wide text-white font-light whitespace-nowrap text-shadow-sm select-none">
+          {previewHint}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -151,7 +151,6 @@ function runInWorker(
 }
 
 const yieldMainThread = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-const FRONTEND_SCALE = 1;
 
 function parseCoordinate(value: number | string | undefined): number | null {
   const parsed = typeof value === "number" ? value : parseFloat(String(value));
@@ -985,7 +984,7 @@ export default function MapPosterGenerator() {
       });
   }, []);
 
-  const handleDownload = async () => {
+  const handleDownload = async (scale: number) => {
     const generationStart = performance.now();
     setIsGenerating(true);
     setGenerationProgress(0);
@@ -1033,8 +1032,8 @@ export default function MapPosterGenerator() {
       const lat = location.lat || 0;
       const lng = location.lng || 0;
 
-      const width = selectedSize.width * FRONTEND_SCALE;
-      const height = selectedSize.height * FRONTEND_SCALE;
+      const width = selectedSize.width * scale;
+      const height = selectedSize.height * scale;
       setGenerationProgress(10);
       // 初始获取数据消息，会被 worker 的进度更新覆盖
       setGenerationStep(m.step_fetching_data());
@@ -1138,8 +1137,8 @@ export default function MapPosterGenerator() {
           customTitle || location.district?.toUpperCase() || location.city.toUpperCase(),
         display_country: location.country,
         text_position: "bottom",
-        selected_size_height: selectedSize.height * FRONTEND_SCALE,
-        frontend_scale: FRONTEND_SCALE,
+        selected_size_height: selectedSize.height * scale,
+        frontend_scale: scale,
         road_width_boost: isProtomaps ? 1.8 : 1.0,
         // 用户关闭 POI 时不传 pois 字段，WASM 端 #[serde(default)] 自动为 None
         ...(showPois ? { pois: Array.from(poisBin) } : {}),
@@ -1273,7 +1272,7 @@ export default function MapPosterGenerator() {
         <AppHeader
           activeLang={activeLang}
           onLangChange={handleLanguageChange}
-          onDownload={handleDownload}
+          onDownload={(scale) => handleDownload(scale)}
           isGenerating={isGenerating}
           locationLoading={locationLoading}
         />
@@ -1300,7 +1299,7 @@ export default function MapPosterGenerator() {
         />
 
         <main className="flex-1 overflow-auto custom-scrollbar w-full mx-auto px-4 py-6">
-          <div className="relative grid md:grid-cols-[480px_1fr] px-0 md:px-20 gap-8 md:h-full">
+          <div className="grid md:grid-cols-[480px_1fr] px-0 md:px-20 gap-8 md:h-full">
             <div className="flex flex-row gap-8 md:min-h-0">
               <ConfigNav
                 sections={navSections}
@@ -1411,6 +1410,7 @@ export default function MapPosterGenerator() {
               showCity={showCity}
               showCountry={showCountry}
               previewRef={previewRef}
+              previewHint={m.preview_actual_result()}
               interactive={true} // locationMode === "coordinates"
               onMove={(loc) => {
                 setLocation((prev) => ({ ...prev, lat: loc.lat, lng: loc.lon }));
@@ -1420,11 +1420,6 @@ export default function MapPosterGenerator() {
                 handleCoordinateReverseGeocode(loc.lat, loc.lon);
               }}
             />
-            <div className="absolute top-3 right-23 z-10 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full pointer-events-none select-none">
-              <span className="text-xs tracking-wide text-white font-light whitespace-nowrap text-shadow-sm">
-                {m.preview_actual_result()}
-              </span>
-            </div>
           </div>
           <PosterGallery />
           <Footer activeLang={activeLang} />
