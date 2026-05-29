@@ -40,6 +40,7 @@ import { RenderControlSettings } from "./components/render-control-settings";
 import { PosterSizeSelector } from "./components/poster-size-selector";
 import { MapPreview } from "./components/map-preview";
 import { GenerationModal } from "./components/generation-modal";
+import { ErrorModal } from "./components/error-modal";
 import { useReverseGeocode } from "@/hooks/useReverseGeocode";
 
 // Extended PosterSize includes icon for size selector UI
@@ -228,6 +229,12 @@ export default function MapPosterGenerator() {
   const [isGameOpen, setIsGameOpen] = useState(false);
   const isGameOpenRef = useRef(false); // track isGameOpen without waiting for React re-render
   const generationCompleteRef = useRef(false);
+  const currentStepRef = useRef<string>("");
+  const [errorModal, setErrorModal] = useState<{
+    error: Error;
+    step: string;
+    diagnostics: Record<string, string>;
+  } | null>(null);
   const [customTitle, setCustomTitle] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
   const [locationMode, setLocationMode] = useState<"search" | "coordinates">("search");
@@ -988,6 +995,7 @@ export default function MapPosterGenerator() {
     const generationStart = performance.now();
     setIsGenerating(true);
     setGenerationProgress(0);
+    currentStepRef.current = "step_init";
     setGenerationStep(m.step_init());
     generationCompleteRef.current = false;
     isGameOpenRef.current = false;
@@ -1000,6 +1008,7 @@ export default function MapPosterGenerator() {
 
     // 设置进度回调，用于接收 data-worker 发来的进度更新
     const progressHandler = (progress: number, step: string) => {
+      currentStepRef.current = step;
       // 处理带等待秒数的步骤 (格式: "step_waiting_api:30" 或 "step_retrying_error:55")
       if (step.startsWith("step_waiting_api:")) {
         const seconds = step.split(":")[1];
@@ -1026,6 +1035,7 @@ export default function MapPosterGenerator() {
 
     try {
       setGenerationProgress(5);
+      currentStepRef.current = "step_coordinates";
       setGenerationStep(m.step_coordinates());
       await yieldMainThread();
       // 直接使用 location 中已有的坐标（来自城市数据）
@@ -1036,6 +1046,7 @@ export default function MapPosterGenerator() {
       const height = selectedSize.height * scale;
       setGenerationProgress(10);
       // 初始获取数据消息，会被 worker 的进度更新覆盖
+      currentStepRef.current = "step_fetching_data";
       setGenerationStep(m.step_fetching_data());
       await yieldMainThread();
 
@@ -1066,18 +1077,22 @@ export default function MapPosterGenerator() {
 
       // 根据缓存层级设置最终消息
       if (cacheLevel === "memory") {
+        currentStepRef.current = "step_restore_memory";
         setGenerationProgress(60);
         setGenerationStep(m.step_restore_memory());
       } else if (fromCache) {
+        currentStepRef.current = "step_cache_restore_complete";
         setGenerationProgress(60);
         setGenerationStep(m.step_cache_restore_complete());
       } else {
+        currentStepRef.current = "step_fetch_complete";
         setGenerationProgress(60);
         setGenerationStep(m.step_fetch_complete());
       }
       await yieldMainThread();
 
       setGenerationProgress(62);
+      currentStepRef.current = "step_sharding_roads";
       setGenerationStep(m.step_sharding_roads());
       await yieldMainThread();
 
@@ -1089,6 +1104,7 @@ export default function MapPosterGenerator() {
       });
 
       setGenerationProgress(65);
+      currentStepRef.current = "step_wasm_processing";
       setGenerationStep(m.step_wasm_processing());
       await yieldMainThread();
 
@@ -1118,10 +1134,12 @@ export default function MapPosterGenerator() {
 
       // 数据处理完成
       setGenerationProgress(82);
+      currentStepRef.current = "step_processing_complete";
       setGenerationStep(m.step_processing_complete());
       await yieldMainThread();
 
       setGenerationProgress(84);
+      currentStepRef.current = "step_prepare_render";
       setGenerationStep(m.step_prepare_render());
       await yieldMainThread();
 
@@ -1152,6 +1170,7 @@ export default function MapPosterGenerator() {
       });
 
       setGenerationProgress(90);
+      currentStepRef.current = "step_rendering";
       setGenerationStep(m.step_rendering());
       await yieldMainThread();
 
@@ -1192,6 +1211,7 @@ export default function MapPosterGenerator() {
 
       if (pngData) {
         setGenerationProgress(97);
+        currentStepRef.current = "step_downloading_file";
         setGenerationStep(m.step_downloading_file());
         console.log(
           "[App] generationCompleteRef set to true, isGameOpen:",
@@ -1211,11 +1231,40 @@ export default function MapPosterGenerator() {
         logClientTiming("download", "file", { total: performance.now() - downloadStart });
         logClientTiming("generation", "total", { total: performance.now() - generationStart });
         setGenerationProgress(100);
+        currentStepRef.current = "step_complete";
         setGenerationStep(m.step_complete());
       }
     } catch (error) {
       console.error(m.error_generating(), error);
-      alert(m.error_generating() + (error instanceof Error ? error.message : String(error)));
+
+      const err = error instanceof Error ? error : new Error(String(error));
+
+      const diagnostics: Record<string, string> = {
+        Language: activeLang,
+        Country: location.country || "(none)",
+        State: location.state || "(none)",
+        City: location.city || "(none)",
+        District: location.district || "(none)",
+        Coordinates: `${location.lat?.toFixed(4) ?? "?"}, ${location.lng?.toFixed(4) ?? "?"}`,
+        Size: `${selectedSize.width}x${selectedSize.height}`,
+        Scale: String(scale),
+        Radius: `${baseRadius}m`,
+        "LOD Mode": lodMode,
+        Theme: selectedTheme.id,
+        Font: customFont ? `Custom (${fontFileName})` : selectedPreset,
+        "Show POIs": String(showPois),
+        "Show Coords": String(showCoords),
+        "Show City": String(showCity),
+        "Show Country": String(showCountry),
+        Timestamp: new Date().toISOString(),
+        "User Agent": navigator.userAgent,
+      };
+
+      setErrorModal({
+        error: err,
+        step: currentStepRef.current || "unknown",
+        diagnostics,
+      });
     } finally {
       console.log(
         "[App] finally block, isGameOpenRef:",
@@ -1296,6 +1345,14 @@ export default function MapPosterGenerator() {
             generationCompleteRef.current = false;
           }}
           triggerLabel={m.snake_game_trigger()}
+        />
+
+        <ErrorModal
+          open={errorModal !== null}
+          onClose={() => setErrorModal(null)}
+          error={errorModal?.error ?? null}
+          errorStep={errorModal?.step ?? ""}
+          diagnosticInfo={errorModal?.diagnostics ?? {}}
         />
 
         <main className="flex-1 overflow-auto custom-scrollbar w-full mx-auto px-4 py-6">
