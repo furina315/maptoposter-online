@@ -640,7 +640,15 @@ self.onmessage = async (event: MessageEvent) => {
           (missingTypes.has("parks") && !parksGeo) ||
           (missingTypes.has("pois") && !poisGeo)
         ) {
-          throw new Error("Failed to fetch data from remote source");
+          const missing = [
+            missingTypes.has("roads") && !roadsGeo ? "roads" : "",
+            missingTypes.has("water") && !waterGeo ? "water" : "",
+            missingTypes.has("parks") && !parksGeo ? "parks" : "",
+            missingTypes.has("pois") && !poisGeo ? "pois" : "",
+          ]
+            .filter(Boolean)
+            .join(", ");
+          throw new Error(`Failed to fetch data from remote source: missing ${missing}`);
         }
       }
 

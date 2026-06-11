@@ -22,6 +22,8 @@ interface ErrorModalProps {
 function parseErrorType(message: string): string {
   if (/^Worker Protocol Error:/.test(message)) return "Worker Protocol Error";
   if (/^Worker Crash:/.test(message)) return "Worker Crash";
+  if (/empty response body|Received empty response/i.test(message)) return "Empty Response Error";
+  if (/Failed to parse JSON|parse.*JSON/i.test(message)) return "Data Format Error";
   if (/Failed to fetch|NetworkError|fetch|network/i.test(message)) return "Network Error";
   if (/WASM|wasm|panic|unreachable/i.test(message)) return "WASM Error";
   if (/Overpass/gi.test(message)) return "Overpass API Error";

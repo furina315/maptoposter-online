@@ -90,6 +90,7 @@ function convertToGeoJSON(results: Record<string, unknown>[]): GeoJSON.FeatureCo
   const dedupedElements = deduplicateOverpassElements(allElements);
 
   if (dedupedElements.length === 0) {
+    log("warn", "Overpass response contained no elements after deduplication");
     return null;
   }
 
@@ -136,7 +137,7 @@ export async function fetchGraphOverpass(
     return convertToGeoJSON(results);
   } catch (error) {
     log("error", `fetchGraphOverpass failed: ${error}`);
-    return null;
+    throw new Error(`fetchGraphOverpass failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -181,7 +182,9 @@ export async function fetchFeaturesOverpass(
     return convertToGeoJSON(results);
   } catch (error) {
     log("error", `fetchFeaturesOverpass (${type}) failed: ${error}`);
-    return null;
+    throw new Error(
+      `fetchFeaturesOverpass (${type}) failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
@@ -205,6 +208,6 @@ export async function fetchPOIsOverpass(
     return convertToGeoJSON(results);
   } catch (error) {
     log("error", `fetchPOIsOverpass failed: ${error}`);
-    return null;
+    throw new Error(`fetchPOIsOverpass failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

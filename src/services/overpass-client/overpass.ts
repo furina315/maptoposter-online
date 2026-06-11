@@ -17,6 +17,27 @@ import {
   sleep,
 } from "./http";
 
+function isRetryableOverpassError(error: unknown): boolean {
+  return error instanceof OverpassResponseError && error.retryable;
+}
+
+async function waitBeforeRetry(
+  errorPause: number,
+  onProgress?: OverpassProgressCallback
+): Promise<void> {
+  if (onProgress) {
+    let remaining = Math.ceil(errorPause / 1000);
+    while (remaining > 0) {
+      onProgress(0, "retrying_error", undefined, undefined, remaining);
+      await new Promise((r) => setTimeout(r, 1000));
+      remaining--;
+    }
+    onProgress(0, "retrying_complete");
+  } else {
+    await sleep(errorPause);
+  }
+}
+
 // ─── Overpass QL 设置字符串 ──────────────────────────────
 
 /**
@@ -494,7 +515,21 @@ async function _overpassRequestInternal(
 
   // ── 步骤 4：解析响应 + Remark 校验 ──
   // 对标 OSMnx/_http.py L291-L332
-  const data = await parseResponse(response);
+  let data: Record<string, unknown>;
+  try {
+    data = await parseResponse(response);
+  } catch (e) {
+    if (isRetryableOverpassError(e) && attempt < maxRetries - 1) {
+      const errorPause = 10_000;
+      log(
+        "warn",
+        `Retryable response error from '${hostname}': ${e}. Retrying in ${errorPause / 1000}s...`
+      );
+      await waitBeforeRetry(errorPause, onProgress);
+      return _overpassRequestInternal(query, maxRetries, attempt + 1, onProgress);
+    }
+    throw e;
+  }
 
   log("info", `Successfully received data from '${hostname}'`);
   return data;
@@ -634,7 +669,21 @@ async function _overpassRequestWithRace(
   }
 
   // ── 步骤 5：解析响应 + Remark 校验 ──
-  const data = await parseResponse(response);
+  let data: Record<string, unknown>;
+  try {
+    data = await parseResponse(response);
+  } catch (e) {
+    if (isRetryableOverpassError(e) && attempt < maxRetries - 1) {
+      const errorPause = 10_000;
+      log(
+        "warn",
+        `Race: retryable response error from '${hostname}': ${e}. Retrying in ${errorPause / 1000}s...`
+      );
+      await waitBeforeRetry(errorPause, onProgress);
+      return _overpassRequestWithRace(query, maxRetries, attempt + 1, onProgress);
+    }
+    throw e;
+  }
   log("info", `Race: Successfully received data from '${hostname}'`);
   return data;
 }

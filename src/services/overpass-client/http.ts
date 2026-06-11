@@ -45,11 +45,13 @@ export function log(level: "debug" | "info" | "warn" | "error", ...args: unknown
  */
 export class OverpassResponseError extends Error {
   public statusCode?: number;
+  public retryable: boolean;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, retryable = false) {
     super(message);
     this.name = "OverpassResponseError";
     this.statusCode = statusCode;
+    this.retryable = retryable;
   }
 }
 
@@ -103,11 +105,6 @@ export function buildHeaders(): HeadersInit {
  */
 export async function parseResponse(response: Response): Promise<Record<string, unknown>> {
   const hostname = new URL(response.url).hostname;
-  const sizeKb = Number(response.headers.get("content-length") || 0) / 1000;
-  log(
-    "info",
-    `Downloaded ${sizeKb.toFixed(1)}kB from '${hostname}' with status ${response.status}`
-  );
 
   // 如果状态码不是 2xx（429/504 由上层 overpassRequest 处理，不会到这里）
   if (!response.ok) {
@@ -117,14 +114,42 @@ export async function parseResponse(response: Response): Promise<Record<string, 
     throw new OverpassStatusCodeError(msg, response.status);
   }
 
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (e) {
+    const msg = `Failed to read response body from '${hostname}' after HTTP ${response.status}: ${e}`;
+    log("warn", msg);
+    throw new OverpassResponseError(msg, response.status, true);
+  }
+
+  // 检查空响应体
+  const sizeKb = new Blob([text]).size / 1000;
+  if (text.trim().length === 0) {
+    const headers = {
+      contentType: response.headers.get("content-type"),
+      contentLength: response.headers.get("content-length"),
+      transferEncoding: response.headers.get("transfer-encoding"),
+    };
+    const msg = `Received empty response body from '${hostname}' (HTTP ${response.status}, ${sizeKb.toFixed(1)}kB). Headers: ${JSON.stringify(headers)}`;
+    log("error", msg);
+    throw new OverpassResponseError(msg, response.status, true);
+  }
+
+  log(
+    "info",
+    `Downloaded ${sizeKb.toFixed(1)}kB from '${hostname}' with status ${response.status}`
+  );
+
   // 解析 JSON
   let data: Record<string, unknown>;
   try {
-    data = (await response.json()) as Record<string, unknown>;
+    data = JSON.parse(text) as Record<string, unknown>;
   } catch (e) {
-    const msg = `Failed to parse JSON from '${hostname}': ${e}`;
+    const preview = text.slice(0, 240).replace(/\s+/g, " ");
+    const msg = `Failed to parse JSON from '${hostname}' after HTTP ${response.status}: ${e}; body preview: ${preview}`;
     log("error", msg);
-    throw new OverpassResponseError(msg, response.status);
+    throw new OverpassResponseError(msg, response.status, true);
   }
 
   // ★ 关键：检测 remark 字段（Overpass 的"伪成功"）
