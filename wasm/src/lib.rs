@@ -128,6 +128,8 @@ pub struct BinaryRenderConfig {
     // POI 数据（可选）
     #[serde(default)]
     pub pois: Option<Vec<f64>>, // [poi_count, x1, y1, x2, y2, ...]
+    #[serde(default)]
+    pub custom_pois: Option<Vec<types::CustomPOI>>,
     // 文本显示开关
     #[serde(default = "types::default_true")]
     pub show_coords: bool,
@@ -139,6 +141,8 @@ pub struct BinaryRenderConfig {
     pub export_format: Option<String>,
     #[serde(default)]
     pub svg_font_mode: Option<String>,
+    #[serde(default = "types::default_pin_theme_config")]
+    pub pin_theme_config: types::PinThemeConfig,
 }
 
 /// 主渲染函数 (二进制直读版本)
@@ -207,6 +211,7 @@ fn render_map_binary_internal(
         .as_ref()
         .map(|p| if p.is_empty() { 0 } else { p[0] as usize })
         .unwrap_or(0);
+    let custom_poi_count = config.custom_pois.as_ref().map(|pois| pois.len()).unwrap_or(0);
 
     let mut total_roads = 0usize;
     let mut road_type_counts = [0usize; 6];
@@ -255,8 +260,8 @@ fn render_map_binary_internal(
     }
 
     log(&format!(
-        "[Render] Elements: {} roads, {} water polygons, {} parks, {} POIs",
-        total_roads, water_count, parks_count, poi_count
+        "[Render] Elements: {} roads, {} water polygons, {} parks, {} POIs, {} custom POIs",
+        total_roads, water_count, parks_count, poi_count, custom_poi_count
     ));
     log(&format!(
         "[Render] Roads by type: Motorway={}, Primary={}, Secondary={}, Tertiary={}, Residential={}, Default={}",
@@ -340,7 +345,21 @@ fn render_map_binary_internal(
     log(&format!("  Default: {:.2}ms", total_timings[5]));
 
     // 投影并绘制 POI
-    if let Some(pois_data) = &config.pois {
+    if let Some(custom_pois) = &config.custom_pois {
+        if !custom_pois.is_empty() {
+            let mut projected_pois = custom_pois.clone();
+            for poi in &mut projected_pois {
+                let (proj_lon, proj_lat) = projection::project_point(poi.lon, poi.lat);
+                poi.lon = proj_lon;
+                poi.lat = proj_lat;
+            }
+
+            time("render_map_bin: draw_custom_pois");
+            let poi_scale = config.frontend_scale / 2.0;
+            renderer.draw_custom_pois(&projected_pois, poi_scale, &config.pin_theme_config);
+            time_end("render_map_bin: draw_custom_pois");
+        }
+    } else if let Some(pois_data) = &config.pois {
         if !pois_data.is_empty() && pois_data[0] as usize > 0 {
             let mut projected_pois = pois_data.clone();
             let poi_count = projected_pois[0] as usize;
@@ -451,7 +470,20 @@ fn render_map_binary_svg(
     log(&format!("  Residential: {:.2}ms", total_timings[4]));
     log(&format!("  Default: {:.2}ms", total_timings[5]));
 
-    if let Some(pois_data) = &config.pois {
+    if let Some(custom_pois) = &config.custom_pois {
+        if !custom_pois.is_empty() {
+            let mut projected_pois = custom_pois.clone();
+            for poi in &mut projected_pois {
+                let (proj_lon, proj_lat) = projection::project_point(poi.lon, poi.lat);
+                poi.lon = proj_lon;
+                poi.lat = proj_lat;
+            }
+            time("render_map_bin: draw_custom_pois");
+            let poi_scale = config.frontend_scale / 2.0;
+            renderer.draw_custom_pois(&projected_pois, poi_scale, &config.pin_theme_config);
+            time_end("render_map_bin: draw_custom_pois");
+        }
+    } else if let Some(pois_data) = &config.pois {
         if !pois_data.is_empty() && pois_data[0] as usize > 0 {
             let mut projected_pois = pois_data.clone();
             let poi_count = projected_pois[0] as usize;

@@ -6,6 +6,15 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 import Sitemap from "vite-plugin-sitemap";
 
+const amapProxy = {
+  "/api/amap-proxy/": {
+    target: "https://restapi.amap.com",
+    changeOrigin: true,
+    secure: true,
+    rewrite: () => "/v3/geocode/geo",
+  },
+};
+
 // https://vite.dev/config/
 export default defineConfig({
   base: "./",
@@ -46,5 +55,11 @@ export default defineConfig({
       treeshake: true,
     },
     sourcemap: false,
+  },
+  server: {
+    proxy: amapProxy,
+  },
+  preview: {
+    proxy: amapProxy,
   },
 });

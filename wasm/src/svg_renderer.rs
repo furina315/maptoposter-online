@@ -3,7 +3,7 @@ use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use tiny_skia::Color;
 
-use crate::types::{BoundingBox, RoadType, TextPosition, Theme};
+use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, RoadType, TextPosition, Theme};
 use crate::utils::{calculate_font_size, format_city_name, format_coordinates, parse_hex_color};
 
 pub struct SvgRenderer {
@@ -16,6 +16,7 @@ pub struct SvgRenderer {
     y_factor: f64,
     text_position: TextPosition,
     next_path_id: u32,
+    next_pin_id: u32,
 }
 
 impl SvgRenderer {
@@ -40,6 +41,7 @@ impl SvgRenderer {
             y_factor: height as f64 / bounds.height(),
             text_position,
             next_path_id: 0,
+            next_pin_id: 0,
         }
     }
 
@@ -189,7 +191,7 @@ impl SvgRenderer {
             return;
         }
 
-        let poi_radius = 8.0 * scale_factor;
+        let poi_radius = 10.0 * scale_factor;
         let min_spacing = 5.0 * scale_factor;
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
         let cell_size = ((poi_radius * 2.0 + min_spacing).ceil() as i32).max(1);
@@ -251,6 +253,80 @@ impl SvgRenderer {
         }
 
         self.svg.push_str("</g>");
+    }
+
+    pub fn draw_custom_pois(
+        &mut self,
+        pois: &[crate::types::CustomPOI],
+        scale_factor: f32,
+        pin_theme_config: &PinThemeConfig,
+    ) {
+        if pois.is_empty() {
+            return;
+        }
+
+        let marker_diameter = 40.0 * scale_factor;
+        let marker_radius = marker_diameter * 0.5;
+        let min_spacing = 5.0 * scale_factor;
+        let min_distance_sq = (marker_diameter + min_spacing) * (marker_diameter + min_spacing);
+        let cell_size = ((marker_diameter + min_spacing).ceil() as i32).max(1);
+        let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+
+        for poi in pois {
+            let (screen_x, screen_y) = self.world_to_screen((poi.lon, poi.lat));
+
+            if screen_x < 0.0
+                || screen_x > self.width as f32
+                || screen_y < 0.0
+                || screen_y > self.height as f32
+            {
+                continue;
+            }
+
+            let cx = (screen_x / cell_size as f32).floor() as i32;
+            let cy = (screen_y / cell_size as f32).floor() as i32;
+            let mut too_close = false;
+            'outer: for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if let Some(pts) = grid.get(&(cx + dx, cy + dy)) {
+                        for &(rx, ry) in pts {
+                            let ddx = screen_x - rx;
+                            let ddy = screen_y - ry;
+                            if ddx * ddx + ddy * ddy < min_distance_sq {
+                                too_close = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if too_close {
+                continue;
+            }
+
+            grid.entry((cx, cy)).or_default().push((screen_x, screen_y));
+            if pin_theme_config.gradient_enabled {
+                self.push_gradient_pin_badge_svg(screen_x, screen_y, marker_radius, pin_theme_config);
+            } else {
+                self.push_solid_pin_badge_svg(screen_x, screen_y, marker_radius, pin_theme_config);
+            }
+            let fallback_radius = marker_radius * pin_theme_config.fallback_dot_scale;
+            if !self.push_custom_poi_icon_svg(
+                poi,
+                screen_x,
+                screen_y,
+                marker_diameter * pin_theme_config.icon_scale,
+            ) {
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(fallback_radius),
+                    escape_attr(&self.theme.poi_icon_color)
+                ));
+            }
+        }
     }
 
     pub fn draw_gradients(&mut self) {
@@ -490,6 +566,17 @@ fn darken_color(color: Color, factor: f32) -> Color {
     .unwrap_or(color)
 }
 
+fn lighten_color(color: Color, factor: f32) -> Color {
+    let inv = 1.0 - factor;
+    Color::from_rgba(
+        (color.red() * inv + factor).clamp(0.0, 1.0),
+        (color.green() * inv + factor).clamp(0.0, 1.0),
+        (color.blue() * inv + factor).clamp(0.0, 1.0),
+        color.alpha(),
+    )
+    .unwrap_or(color)
+}
+
 fn color_to_hex(color: Color) -> String {
     format!(
         "#{:02X}{:02X}{:02X}",
@@ -512,6 +599,233 @@ fn escape_text(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+impl SvgRenderer {
+    fn push_custom_poi_icon_svg(
+        &mut self,
+        poi: &crate::types::CustomPOI,
+        screen_x: f32,
+        screen_y: f32,
+        icon_size: f32,
+    ) -> bool {
+        let Some(icon) = &poi.icon else {
+            return false;
+        };
+        if icon.view_box_width <= 0.0 || icon.view_box_height <= 0.0 || icon.paths.is_empty() {
+            return false;
+        }
+
+        let icon_scale = icon_size / icon.view_box_width.max(icon.view_box_height);
+        let translate_x = screen_x - icon.view_box_width * icon_scale * 0.5;
+        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5;
+
+        self.svg.push_str(&format!(
+            r#"<g transform="translate({} {}) scale({})" fill="{}">"#,
+            fmt1(translate_x),
+            fmt1(translate_y),
+            fmt2(icon_scale),
+            escape_attr(&self.theme.poi_icon_color)
+        ));
+
+        let mut pushed_any = false;
+        for path in &icon.paths {
+            self.svg.push_str(&format!(r#"<path d="{}""#, escape_attr(&path.d)));
+            if let Some(fill_rule) = &path.fill_rule {
+                self.svg
+                    .push_str(&format!(r#" fill-rule="{}""#, escape_attr(fill_rule)));
+            }
+            self.svg.push_str("/>");
+            pushed_any = true;
+        }
+
+        self.svg.push_str("</g>");
+        pushed_any
+    }
+
+    fn push_gradient_pin_badge_svg(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        marker_radius: f32,
+        pin_theme_config: &PinThemeConfig,
+    ) {
+        let pin_id = self.next_pin_id;
+        self.next_pin_id += 1;
+        let poi_color = parse_hex_color(&self.theme.poi_color);
+        let base_hex = escape_attr(&self.theme.poi_color);
+        let shadow_base = parse_hex_color(&pin_theme_config.shadow_color);
+        let shadow_base_hex = escape_attr(&pin_theme_config.shadow_color);
+
+        match pin_theme_config.style {
+            PinThemeStyle::Puff => {
+                // Layer 1: soft shadow with radial gradient
+                let shadow_y = screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale;
+                let shadow_r = marker_radius * pin_theme_config.shadow_radius_scale * pin_theme_config.shadow_spread;
+                let shadow_c = Color::from_rgba(
+                    shadow_base.red(), shadow_base.green(), shadow_base.blue(),
+                    pin_theme_config.shadow_alpha,
+                ).unwrap();
+                let shadow_hex = color_to_hex(shadow_c);
+                self.svg.push_str(&format!(
+                    r##"<defs><radialGradient id="mp-pin-shadow-{pin_id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}"><stop offset="0%" stop-color="{shadow_hex}" stop-opacity="1"/><stop offset="100%" stop-color="{shadow_base_hex}" stop-opacity="0"/></radialGradient></defs><circle cx="{}" cy="{}" r="{}" fill="url(#mp-pin-shadow-{pin_id})"/>"##,
+                    fmt1(screen_x), fmt1(shadow_y), fmt2(shadow_r),
+                    fmt1(screen_x), fmt1(shadow_y), fmt2(shadow_r),
+                ));
+
+                // Layer 2: body sphere with radial gradient
+                let body_light = lighten_color(poi_color, pin_theme_config.body_lighten);
+                let body_dark = darken_color(poi_color, pin_theme_config.body_darken);
+                let body_light_hex = color_to_hex(body_light);
+                let body_dark_hex = color_to_hex(body_dark);
+                let grad_cx = screen_x + marker_radius * 0.15;
+                let grad_cy = screen_y + marker_radius * -0.15;
+                let body_grad_r = marker_radius * 1.3;
+                self.svg.push_str(&format!(
+                    r##"<defs><radialGradient id="mp-pin-body-{pin_id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}"><stop offset="0%" stop-color="{body_light_hex}" stop-opacity="1"/><stop offset="55%" stop-color="{base_hex}" stop-opacity="1"/><stop offset="100%" stop-color="{body_dark_hex}" stop-opacity="1"/></radialGradient></defs><circle cx="{}" cy="{}" r="{}" fill="url(#mp-pin-body-{pin_id})"/>"##,
+                    fmt1(grad_cx), fmt1(grad_cy), fmt2(body_grad_r),
+                    fmt1(screen_x), fmt1(screen_y), fmt2(marker_radius),
+                ));
+
+                // Layer 3: soft highlight with radial gradient
+                let hl_x = screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale;
+                let hl_y = screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale;
+                let hl_r = marker_radius * pin_theme_config.highlight_radius_scale * pin_theme_config.highlight_spread;
+                let hl_color = Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.highlight_alpha).unwrap();
+                let hl_hex = color_to_hex(hl_color);
+                self.svg.push_str(&format!(
+                    r##"<defs><radialGradient id="mp-pin-hl-{pin_id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}"><stop offset="0%" stop-color="{hl_hex}" stop-opacity="1"/><stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient></defs><circle cx="{}" cy="{}" r="{}" fill="url(#mp-pin-hl-{pin_id})"/>"##,
+                    fmt1(hl_x), fmt1(hl_y), fmt2(hl_r),
+                    fmt1(hl_x), fmt1(hl_y), fmt2(hl_r),
+                ));
+            }
+            _ => {
+                self.push_solid_pin_badge_svg(screen_x, screen_y, marker_radius, pin_theme_config);
+            }
+        }
+    }
+
+    fn push_solid_pin_badge_svg(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        marker_radius: f32,
+        pin_theme_config: &PinThemeConfig,
+    ) {
+        let base = escape_attr(&self.theme.poi_color);
+        match pin_theme_config.style {
+            PinThemeStyle::Puff => {
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#000000" fill-opacity="0.12"/>"##,
+                    fmt1(screen_x),
+                    fmt1(screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.shadow_radius_scale)
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius),
+                    base
+                ));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#FFFFFF" fill-opacity="{}"/>"##,
+                    fmt1(screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale),
+                    fmt1(screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.highlight_radius_scale),
+                    fmt2(pin_theme_config.highlight_alpha)
+                ));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#000000" fill-opacity="{}"/>"##,
+                    fmt1(screen_x),
+                    fmt1(screen_y + marker_radius * pin_theme_config.inner_shadow_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.inner_shadow_radius_scale),
+                    fmt2(pin_theme_config.inner_shadow_alpha)
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius * pin_theme_config.inner_body_scale),
+                    base
+                ));
+            }
+            PinThemeStyle::Badge => {
+                let rim =
+                    color_to_hex(darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.rim_darken));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#000000" fill-opacity="{}"/>"##,
+                    fmt1(screen_x),
+                    fmt1(screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.shadow_radius_scale),
+                    fmt2(pin_theme_config.shadow_alpha)
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius),
+                    rim
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius * pin_theme_config.inner_body_scale),
+                    base
+                ));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#FFFFFF" fill-opacity="{}"/>"##,
+                    fmt1(screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale),
+                    fmt1(screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.highlight_radius_scale),
+                    fmt2(pin_theme_config.highlight_alpha)
+                ));
+            }
+            PinThemeStyle::Pinhead => {
+                let outer_rim =
+                    color_to_hex(darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.rim_darken));
+                let inner_body = color_to_hex(
+                    darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.inner_body_darken),
+                );
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#000000" fill-opacity="{}"/>"##,
+                    fmt1(screen_x),
+                    fmt1(screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.shadow_radius_scale),
+                    fmt2(pin_theme_config.shadow_alpha)
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius),
+                    outer_rim
+                ));
+                self.svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
+                    fmt1(screen_x),
+                    fmt1(screen_y),
+                    fmt2(marker_radius * pin_theme_config.inner_body_scale),
+                    inner_body
+                ));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#FFFFFF" fill-opacity="{}"/>"##,
+                    fmt1(screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale),
+                    fmt1(screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.highlight_radius_scale),
+                    fmt2(pin_theme_config.highlight_alpha)
+                ));
+                self.svg.push_str(&format!(
+                    r##"<circle cx="{}" cy="{}" r="{}" fill="#FFFFFF" fill-opacity="{}"/>"##,
+                    fmt1(screen_x + marker_radius * pin_theme_config.secondary_highlight_offset_x_scale),
+                    fmt1(screen_y + marker_radius * pin_theme_config.secondary_highlight_offset_y_scale),
+                    fmt2(marker_radius * pin_theme_config.secondary_highlight_radius_scale),
+                    fmt2(pin_theme_config.secondary_highlight_alpha)
+                ));
+            }
+        }
+    }
 }
 
 fn encode_base64(data: &[u8]) -> String {

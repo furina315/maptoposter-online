@@ -11,6 +11,7 @@ import {
   Eye,
   FileText,
   Scaling,
+  Pin,
 } from "lucide-react";
 import { useLocationData } from "@/hooks/useLocationData";
 import { getUserGeolocation } from "@/services/ip-geolocation";
@@ -18,7 +19,13 @@ import { getUserGeolocation } from "@/services/ip-geolocation";
 // WASM and Utils
 import init, { init_panic_hook } from "./pkg/wasm";
 import { shardRoadsBinary } from "./utils";
-import { type MapColors, MAP_THEMES as THEMES, type Location } from "@/lib/types";
+import {
+  type CustomPOI,
+  type MapColors,
+  MAP_THEMES as THEMES,
+  type Location,
+  type PoiSource,
+} from "@/lib/types";
 import { mapDataService } from "./services/map-data";
 import { type State, type City, type District } from "@/services/location-types";
 // Paraglide i18n
@@ -42,6 +49,9 @@ import { MapPreview } from "./components/map-preview";
 import { GenerationModal } from "./components/generation-modal";
 import { ErrorModal } from "./components/error-modal";
 import { useReverseGeocode } from "@/hooks/useReverseGeocode";
+import { getPoiIconDefinition } from "@/lib/poi-icon-registry";
+import { CustomPOISettings } from "./components/custom-poi-settings";
+import { POIManagementDialog } from "./components/poi-management-dialog";
 
 // Extended PosterSize includes icon for size selector UI
 interface LocalPosterSize extends PosterSize {
@@ -51,6 +61,167 @@ interface LocalPosterSize extends PosterSize {
 // Worker task types
 type WorkerTaskType = "roads" | "polygons" | "pois" | "render";
 type ExportFormat = "png" | "svg";
+type PinThemeStyle = "puff" | "badge" | "pinhead";
+interface PinThemeConfig {
+  // 风格名称：puff / badge / pinhead
+  style: PinThemeStyle;
+  // 图标在圆形徽章中的相对尺寸，基于徽章直径
+  iconScale: number;
+  // 没有 SVG 图标时，中间回退小圆点的相对尺寸，基于徽章半径
+  fallbackDotScale: number;
+  // 外阴影透明度
+  shadowAlpha: number;
+  // 外阴影纵向偏移，基于徽章半径
+  shadowOffsetYScale: number;
+  // 外阴影半径，基于徽章半径
+  shadowRadiusScale: number;
+  // 外圈压边/边框的加深系数，数值越小边缘越深
+  rimDarken: number;
+  // 内层主体颜色的加深系数，主要用于 badge / pinhead
+  innerBodyDarken: number;
+  // 内层主体尺寸，基于徽章半径
+  innerBodyScale: number;
+  // 主高光透明度
+  highlightAlpha: number;
+  // 主高光横向偏移，基于徽章半径
+  highlightOffsetXScale: number;
+  // 主高光纵向偏移，基于徽章半径
+  highlightOffsetYScale: number;
+  // 主高光尺寸，基于徽章半径
+  highlightRadiusScale: number;
+  // 次级高光透明度，主要用于 pinhead 的硬质反光
+  secondaryHighlightAlpha: number;
+  // 次级高光横向偏移，基于徽章半径
+  secondaryHighlightOffsetXScale: number;
+  // 次级高光纵向偏移，基于徽章半径
+  secondaryHighlightOffsetYScale: number;
+  // 次级高光尺寸，基于徽章半径
+  secondaryHighlightRadiusScale: number;
+  // 内阴影透明度，主要用于 puff 的柔和鼓起感
+  innerShadowAlpha: number;
+  // 内阴影纵向偏移，基于徽章半径
+  innerShadowOffsetYScale: number;
+  // 内阴影尺寸，基于徽章半径
+  innerShadowRadiusScale: number;
+  // 是否启用径向渐变渲染
+  gradientEnabled: boolean;
+  // 球体中心提亮系数（0.12 = 向白色混合 12%）
+  bodyLighten: number;
+  // 球体边缘压暗系数（0.18 = 亮度 × 0.82）
+  bodyDarken: number;
+  // 高光扩散系数（>1.0 扩大高光范围）
+  highlightSpread: number;
+  // 阴影扩散系数（>1.0 扩大阴影范围）
+  shadowSpread: number;
+  // 阴影颜色（hex，默认 #000000）
+  shadowColor: string;
+}
+
+// Internal-only marker theme switch.
+const INTERNAL_PIN_THEME_STYLE: PinThemeStyle = "puff";
+// 内部测试用图钉主题参数表。
+// 修改这里的数值后，保存并刷新页面即可重新导出对比效果；仅调这些前端参数时，不需要重新打包 wasm。
+const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
+  puff: {
+    style: "puff",
+    // --- gradient-active params ---
+    gradientEnabled: true,
+    shadowAlpha: 0.32,
+    shadowOffsetYScale: 0.32,
+    shadowRadiusScale: 0.92,
+    shadowSpread: 1.2,
+    shadowColor: "#000000",
+    bodyLighten: 0.12,
+    bodyDarken: 0.85,
+    highlightAlpha: 0.32,
+    highlightOffsetXScale: -0.22,
+    highlightOffsetYScale: -0.28,
+    highlightRadiusScale: 0.72,
+    highlightSpread: 1.0,
+    iconScale: 0.7,
+    fallbackDotScale: 0.28,
+    // --- solid-only fallback (dead when gradientEnabled=true) ---
+    rimDarken: 0.82,
+    innerBodyDarken: 0.96,
+    innerBodyScale: 0.88,
+    secondaryHighlightAlpha: 0,
+    secondaryHighlightOffsetXScale: 0,
+    secondaryHighlightOffsetYScale: 0,
+    secondaryHighlightRadiusScale: 0,
+    innerShadowAlpha: 0.10,
+    innerShadowOffsetYScale: 0.22,
+    innerShadowRadiusScale: 0.78,
+  },
+
+  badge: {
+    style: "badge",
+    iconScale: 0.78,
+    fallbackDotScale: 0.28,
+    // 阴影：扁平徽章，阴影小而实，不飘
+    shadowAlpha: 0.22,              // 0.18→0.22，徽章阴影清晰
+    shadowOffsetYScale: 0.14,       // 0.18→0.14，偏移略小
+    shadowRadiusScale: 0.60,        // 1.0→0.60，硬质阴影，收紧
+    // 边缘：压制感，像冲压金属边缘
+    rimDarken: 0.60,                // 0.74→0.60，边缘明显更暗
+    innerBodyDarken: 0.82,          // 0.9→0.82，内层主体明显压暗，凹入感
+    innerBodyScale: 0.88,
+    // 高光：极小且弱，接近哑光珐琅，仅有轻微光泽
+    highlightAlpha: 0.10,           // 0.20→0.10，哑光不该有强高光
+    highlightOffsetXScale: -0.14,
+    highlightOffsetYScale: -0.26,
+    highlightRadiusScale: 0.32,     // 0.48→0.32，高光很小很紧
+    // 次级高光：无
+    secondaryHighlightAlpha: 0,
+    secondaryHighlightOffsetXScale: 0,
+    secondaryHighlightOffsetYScale: 0,
+    secondaryHighlightRadiusScale: 0,
+    // 内阴影：无，badge 是平的
+    innerShadowAlpha: 0,
+    innerShadowOffsetYScale: 0,
+    innerShadowRadiusScale: 0,
+    gradientEnabled: false,
+    bodyLighten: 0.12,
+    bodyDarken: 0.18,
+    highlightSpread: 1.0,
+    shadowSpread: 1.2,
+    shadowColor: "#000000",
+  },
+
+  pinhead: {
+    style: "pinhead",
+    iconScale: 0.78,
+    fallbackDotScale: 0.28,
+    // 阴影：硬质球体投影，清晰
+    shadowAlpha: 0.24,              // 0.20→0.24
+    shadowOffsetYScale: 0.18,
+    shadowRadiusScale: 0.80,        // 0.96→0.80，玻璃球阴影较实
+    // 边缘：玻璃球边缘暗部很重，折射造成深色边圈
+    rimDarken: 0.44,                // 0.62→0.44，边缘显著更暗
+    innerBodyDarken: 0.92,          // 0.9→0.92，内部略微暗，背景色透过玻璃
+    innerBodyScale: 0.90,           // 0.88→0.90
+    // 主高光：强且集中，镜面反射点，偏左上
+    highlightAlpha: 0.38,           // 0.26→0.38，玻璃主高光要强
+    highlightOffsetXScale: -0.22,   // -0.18→-0.22
+    highlightOffsetYScale: -0.32,   // -0.28→-0.32，更偏顶部
+    highlightRadiusScale: 0.28,     // 0.42→0.28，高光小且集中，镜面感
+    // 次级高光：右下环境光反射，玻璃球特有
+    secondaryHighlightAlpha: 0.20,  // 0.14→0.20，加强，模拟底部透光
+    secondaryHighlightOffsetXScale: 0.16, // 0.10→0.16，更偏右
+    secondaryHighlightOffsetYScale: 0.14, // 0.08→0.14，更偏下
+    secondaryHighlightRadiusScale: 0.48,  // 0.62→0.48，比主高光大但仍集中
+    // 内阴影：无
+    innerShadowAlpha: 0,
+    innerShadowOffsetYScale: 0,
+    innerShadowRadiusScale: 0,
+    gradientEnabled: false,
+    bodyLighten: 0.12,
+    bodyDarken: 0.18,
+    highlightSpread: 1.0,
+    shadowSpread: 1.2,
+    shadowColor: "#000000",
+  },
+};
+const INTERNAL_PIN_THEME_CONFIG = INTERNAL_PIN_THEME_CONFIGS[INTERNAL_PIN_THEME_STYLE];
 
 interface RenderOptions {
   roads_shards: Float64Array[];
@@ -390,7 +561,10 @@ export default function MapPosterGenerator() {
   const [showCoords, setShowCoords] = useState(true);
   const [showCity, setShowCity] = useState(true);
   const [showCountry, setShowCountry] = useState(true);
-  const [showPois, setShowPois] = useState(false); // 地图元素渲染：POI 兴趣点
+  const [poiSource, setPoiSource] = useState<PoiSource>("off");
+  const [customPois, setCustomPois] = useState<CustomPOI[]>([]);
+  const [amapApiKey, setAmapApiKey] = useState("");
+  const [isPoiDialogOpen, setIsPoiDialogOpen] = useState(false);
 
   // Persistence Handling
   const isRestored = useRef(false);
@@ -445,7 +619,9 @@ export default function MapPosterGenerator() {
       showCoords,
       showCity,
       showCountry,
-      showPois,
+      poiSource,
+      customPois,
+      amapApiKey,
     };
     localStorage.setItem("maptoposter_config", JSON.stringify(config));
   }, [
@@ -461,7 +637,9 @@ export default function MapPosterGenerator() {
     showCoords,
     showCity,
     showCountry,
-    showPois,
+    poiSource,
+    customPois,
+    amapApiKey,
   ]);
 
   useEffect(() => {
@@ -481,7 +659,22 @@ export default function MapPosterGenerator() {
         if (typeof config.showCoords === "boolean") setShowCoords(config.showCoords);
         if (typeof config.showCity === "boolean") setShowCity(config.showCity);
         if (typeof config.showCountry === "boolean") setShowCountry(config.showCountry);
-        if (typeof config.showPois === "boolean") setShowPois(config.showPois);
+        // Migrate the old boolean flag to the new mutually exclusive POI source enum.
+        if (
+          config.poiSource === "off" ||
+          config.poiSource === "overpass" ||
+          config.poiSource === "custom"
+        ) {
+          setPoiSource(config.poiSource);
+        } else if (typeof config.showPois === "boolean") {
+          setPoiSource(config.showPois ? "overpass" : "off");
+        }
+        if (Array.isArray(config.customPois)) {
+          setCustomPois(config.customPois);
+        }
+        if (typeof config.amapApiKey === "string") {
+          setAmapApiKey(config.amapApiKey);
+        }
 
         // Restore Location Text/Coords
         if (config.customTitle) setCustomTitle(config.customTitle);
@@ -1063,7 +1256,7 @@ export default function MapPosterGenerator() {
         baseRadius,
         lodMode,
         location.district,
-        !showPois // skipPois
+        poiSource !== "overpass"
       );
 
       const { roads, water, parks, pois: poisRaw, fromCache, cacheLevel, isProtomaps } = mapResults;
@@ -1128,7 +1321,7 @@ export default function MapPosterGenerator() {
         runInWorker(workers[1 % numWorkers], "polygons", parksTyped, [parksTyped.buffer], "parks"),
       ]);
       // 用户关闭 POI 时跳过 worker 处理，直接构造空数组（WASM 会跳过渲染）
-      const poisBin = showPois
+      const poisBin = poiSource === "overpass"
         ? await runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer], "pois")
         : new Float64Array([0]);
       logClientTiming("processing", "wasmAll", { total: performance.now() - wasmProcessingStart });
@@ -1160,12 +1353,24 @@ export default function MapPosterGenerator() {
         frontend_scale: scale,
         road_width_boost: isProtomaps ? 1.8 : 1.0,
         // 用户关闭 POI 时不传 pois 字段，WASM 端 #[serde(default)] 自动为 None
-        ...(showPois ? { pois: Array.from(poisBin) } : {}),
+        ...(poiSource === "overpass" ? { pois: Array.from(poisBin) } : {}),
+        ...(poiSource === "custom"
+          ? {
+              custom_pois: customPois.map((poi) => ({
+                name: poi.name,
+                lat: poi.lat,
+                lon: poi.lng,
+                poi_type: poi.poiType,
+                icon: getPoiIconDefinition(poi.poiType),
+              })),
+            }
+          : {}),
         show_coords: showCoords,
         show_city: showCity,
         show_country: showCountry,
         export_format: exportFormat,
         svg_font_mode: "embed",
+        pin_theme_config: INTERNAL_PIN_THEME_CONFIG,
       };
       logClientTiming("processing", "prepareRenderConfig", {
         total: performance.now() - configStart,
@@ -1190,7 +1395,7 @@ export default function MapPosterGenerator() {
         waterBin.buffer,
         parksBin.buffer,
         // 空 POI 数组无 buffer 可 transfer，仅当用户开启 POI 时加入传输列表
-        ...(showPois && poisBin.length > 1 ? [poisBin.buffer] : []),
+        ...(poiSource === "overpass" && poisBin.length > 1 ? [poisBin.buffer] : []),
       ];
 
       // 从缓存直接取字体数据，与预览状态解耦
@@ -1256,7 +1461,8 @@ export default function MapPosterGenerator() {
         "LOD Mode": lodMode,
         Theme: selectedTheme.id,
         Font: customFont ? `Custom (${fontFileName})` : selectedPreset,
-        "Show POIs": String(showPois),
+        "POI Source": poiSource,
+        "Custom POIs": String(customPois.length),
         "Show Coords": String(showCoords),
         "Show City": String(showCity),
         "Show Country": String(showCountry),
@@ -1292,6 +1498,13 @@ export default function MapPosterGenerator() {
 
   useDynamicFont(activeLang);
 
+  const poiSourceLabel =
+    poiSource === "custom"
+      ? m.poi_source_custom()
+      : poiSource === "overpass"
+        ? m.poi_source_overpass()
+        : m.poi_source_off();
+
   const navSections = useMemo<NavSection[]>(
     () => [
       { id: "section-location", icon: <MapPin className="w-5 h-5" />, label: m.location() },
@@ -1305,6 +1518,11 @@ export default function MapPosterGenerator() {
         id: "section-text-display",
         icon: <Eye className="w-5 h-5" />,
         label: m.render_control(),
+      },
+      {
+        id: "section-custom-pois",
+        icon: <Pin className="w-5 h-5" />,
+        label: m.custom_poi_nav_label(),
       },
       {
         id: "section-font-settings",
@@ -1357,6 +1575,28 @@ export default function MapPosterGenerator() {
           error={errorModal?.error ?? null}
           errorStep={errorModal?.step ?? ""}
           diagnosticInfo={errorModal?.diagnostics ?? {}}
+        />
+
+        <POIManagementDialog
+          open={isPoiDialogOpen}
+          onOpenChange={setIsPoiDialogOpen}
+          customPois={customPois}
+          setCustomPois={setCustomPois}
+          amapApiKey={amapApiKey}
+          setAmapApiKey={setAmapApiKey}
+          currentLat={location.lat ?? null}
+          currentLng={location.lng ?? null}
+          areaCacheKey={[
+            location.country,
+            location.state,
+            location.city,
+            location.district,
+            location.lat?.toFixed(4),
+            location.lng?.toFixed(4),
+          ]
+            .filter(Boolean)
+            .join("|")}
+          searchCity={selectedCity || location.city || location.district || ""}
         />
 
         <main className="flex-1 overflow-auto custom-scrollbar w-full mx-auto px-4 py-6">
@@ -1428,11 +1668,19 @@ export default function MapPosterGenerator() {
                     showCoords={showCoords}
                     showCity={showCity}
                     showCountry={showCountry}
-                    showPois={showPois}
+                    poiSource={poiSource}
                     onShowCoordsChange={setShowCoords}
                     onShowCityChange={setShowCity}
                     onShowCountryChange={setShowCountry}
-                    onShowPoisChange={setShowPois}
+                    onPoiSourceChange={setPoiSource}
+                  />
+                </div>
+
+                <div id="section-custom-pois" ref={setSectionRef("section-custom-pois")}>
+                  <CustomPOISettings
+                    customPoiCount={customPois.length}
+                    poiSourceLabel={poiSourceLabel}
+                    onManageClick={() => setIsPoiDialogOpen(true)}
                   />
                 </div>
 

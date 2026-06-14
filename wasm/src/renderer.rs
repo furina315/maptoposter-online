@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 // [Road Casing] 新增 LineCap / LineJoin，用于道路圆头描边
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Point,
+    RadialGradient, SpreadMode, Stroke, Transform,
 };
 
-use crate::types::{BoundingBox, PolyFeature, Road, RoadType, TextPosition, Theme};
-use crate::utils::{calculate_font_size, format_city_name, format_coordinates, parse_hex_color};
+use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PolyFeature, Road, RoadType, TextPosition, Theme};
+use crate::utils::{calculate_font_size, format_city_name, format_coordinates, log, parse_hex_color};
 
 /// 地图渲染引擎
 pub struct MapRenderer {
@@ -480,7 +481,7 @@ impl MapRenderer {
         // 使用主题中的 POI 专用颜色
         let poi_color = parse_hex_color(&self.theme.poi_color);
 
-        let poi_radius = 10.0 * scale_factor; // POI 圆点半径随分辨率缩放
+        let poi_radius = 20.0 * scale_factor;
         let min_spacing = 8.0 * scale_factor; // POI 之间最小间距（像素）
         const MAX_POIS: usize = 50; // 最多渲染 50 个 POI 点
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
@@ -591,7 +592,7 @@ impl MapRenderer {
         // 使用主题中的 POI 专用颜色
         let poi_color = parse_hex_color(&self.theme.poi_color);
 
-        let poi_radius = 8.0 * scale_factor; // POI 圆点半径随分辨率缩放
+        let poi_radius = 20.0 * scale_factor;
         let min_spacing = 5.0 * scale_factor; // POI 之间最小间距随分辨率缩放
         const MAX_POIS: usize = 50;
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
@@ -678,6 +679,419 @@ impl MapRenderer {
             )
             .into(),
         );
+    }
+
+    pub fn draw_custom_pois(&mut self, pois: &[crate::types::CustomPOI], scale: f32, pin_theme_config: &PinThemeConfig) {
+        self.draw_custom_pois_scaled(pois, scale, pin_theme_config);
+    }
+
+    pub fn draw_custom_pois_scaled(
+        &mut self,
+        pois: &[crate::types::CustomPOI],
+        scale_factor: f32,
+        pin_theme_config: &PinThemeConfig,
+    ) {
+        if pois.is_empty() {
+            return;
+        }
+
+        let scale_factor = scale_factor * self.render_scale as f32;
+        let poi_color = parse_hex_color(&self.theme.poi_color);
+        let marker_radius = 20.0 * scale_factor;
+        let min_spacing = 8.0 * scale_factor;
+        let min_distance_sq = (marker_radius * 2.0 + min_spacing) * (marker_radius * 2.0 + min_spacing);
+        let cell_size = ((marker_radius * 2.0 + min_spacing).ceil() as i32).max(1);
+        let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+        let mut rendered_count = 0usize;
+        let rw = self.render_width() as f32;
+        let rh = self.render_height() as f32;
+        let mut badge_paint = Paint::default();
+        badge_paint.set_color(poi_color);
+        badge_paint.anti_alias = true;
+        let mut icon_paint = Paint::default();
+        icon_paint.set_color(parse_hex_color(&self.theme.poi_icon_color));
+        icon_paint.anti_alias = true;
+        let mut shadow_paint = Paint::default();
+        shadow_paint.anti_alias = true;
+        let mut rim_paint = Paint::default();
+        rim_paint.anti_alias = true;
+        let mut highlight_paint = Paint::default();
+        highlight_paint.anti_alias = true;
+
+        for poi in pois {
+            let (screen_x, screen_y) = self.world_to_screen((poi.lon, poi.lat));
+            if screen_x < 0.0 || screen_x > rw || screen_y < 0.0 || screen_y > rh {
+                continue;
+            }
+
+            let cx = (screen_x / cell_size as f32).floor() as i32;
+            let cy = (screen_y / cell_size as f32).floor() as i32;
+            let mut too_close = false;
+            'outer: for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if let Some(pts) = grid.get(&(cx + dx, cy + dy)) {
+                        for &(rx, ry) in pts {
+                            let ddx = screen_x - rx;
+                            let ddy = screen_y - ry;
+                            if ddx * ddx + ddy * ddy < min_distance_sq {
+                                too_close = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if too_close {
+                continue;
+            }
+
+            grid.entry((cx, cy)).or_default().push((screen_x, screen_y));
+            self.draw_pin_badge(
+                screen_x,
+                screen_y,
+                marker_radius,
+                pin_theme_config,
+                &mut shadow_paint,
+                &badge_paint,
+                &mut rim_paint,
+                &mut highlight_paint,
+            );
+            if !self.draw_custom_poi_icon(
+                &icon_paint,
+                poi,
+                screen_x,
+                screen_y,
+                marker_radius * 2.0 * pin_theme_config.icon_scale,
+            )
+            {
+                let mut fallback_pb = PathBuilder::new();
+                fallback_pb.push_circle(screen_x, screen_y, marker_radius * pin_theme_config.fallback_dot_scale);
+                if let Some(fallback_path) = fallback_pb.finish() {
+                    self.pixmap.fill_path(
+                        &fallback_path,
+                        &icon_paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+            }
+            rendered_count += 1;
+        }
+
+        log(&format!(
+            "Rendered {} custom POIs using theme color {}",
+            rendered_count, &self.theme.poi_color
+        ));
+    }
+
+    fn draw_custom_poi_icon(
+        &mut self,
+        paint: &Paint,
+        poi: &crate::types::CustomPOI,
+        screen_x: f32,
+        screen_y: f32,
+        icon_size: f32,
+    ) -> bool {
+        let Some(icon) = &poi.icon else {
+            return false;
+        };
+        if icon.view_box_width <= 0.0 || icon.view_box_height <= 0.0 || icon.paths.is_empty() {
+            return false;
+        }
+
+        let icon_scale = icon_size / icon.view_box_width.max(icon.view_box_height);
+        let translate_x = screen_x - icon.view_box_width * icon_scale * 0.5;
+        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5;
+        let transform = Transform::from_scale(icon_scale, icon_scale)
+            .post_translate(translate_x, translate_y);
+
+        let mut drew_any = false;
+        for icon_path in &icon.paths {
+            let Some(path) = build_custom_poi_icon_path(&icon_path.commands) else {
+                continue;
+            };
+            let Some(transformed_path) = path.transform(transform) else {
+                continue;
+            };
+            let fill_rule = match icon_path.fill_rule.as_deref() {
+                Some("evenodd") => FillRule::EvenOdd,
+                _ => FillRule::Winding,
+            };
+            self.pixmap
+                .fill_path(&transformed_path, paint, fill_rule, Transform::identity(), None);
+            drew_any = true;
+        }
+
+        drew_any
+    }
+
+    fn draw_pin_badge(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        marker_radius: f32,
+        pin_theme_config: &PinThemeConfig,
+        shadow_paint: &mut Paint,
+        badge_paint: &Paint,
+        rim_paint: &mut Paint,
+        highlight_paint: &mut Paint,
+    ) {
+        if pin_theme_config.gradient_enabled {
+            self.draw_gradient_pin_badge(
+                screen_x,
+                screen_y,
+                marker_radius,
+                pin_theme_config,
+            );
+        } else {
+            self.draw_solid_pin_badge(
+                screen_x,
+                screen_y,
+                marker_radius,
+                pin_theme_config,
+                shadow_paint,
+                badge_paint,
+                rim_paint,
+                highlight_paint,
+            );
+        }
+    }
+
+    fn draw_solid_pin_badge(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        marker_radius: f32,
+        pin_theme_config: &PinThemeConfig,
+        shadow_paint: &mut Paint,
+        badge_paint: &Paint,
+        rim_paint: &mut Paint,
+        highlight_paint: &mut Paint,
+    ) {
+        match pin_theme_config.style {
+            PinThemeStyle::Puff => {
+                shadow_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, pin_theme_config.shadow_alpha).unwrap());
+                self.fill_circle(
+                    screen_x,
+                    screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale,
+                    marker_radius * pin_theme_config.shadow_radius_scale,
+                    shadow_paint,
+                );
+                self.fill_circle(screen_x, screen_y, marker_radius, badge_paint);
+                highlight_paint.set_color(Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.highlight_alpha).unwrap());
+                self.fill_circle(
+                    screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale,
+                    screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale,
+                    marker_radius * pin_theme_config.highlight_radius_scale,
+                    highlight_paint,
+                );
+                rim_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, pin_theme_config.inner_shadow_alpha).unwrap());
+                self.fill_circle(
+                    screen_x,
+                    screen_y + marker_radius * pin_theme_config.inner_shadow_offset_y_scale,
+                    marker_radius * pin_theme_config.inner_shadow_radius_scale,
+                    rim_paint,
+                );
+                self.fill_circle(screen_x, screen_y, marker_radius * pin_theme_config.inner_body_scale, badge_paint);
+            }
+            PinThemeStyle::Badge => {
+                let badge_rim_color =
+                    darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.rim_darken);
+                shadow_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, pin_theme_config.shadow_alpha).unwrap());
+                self.fill_circle(
+                    screen_x,
+                    screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale,
+                    marker_radius * pin_theme_config.shadow_radius_scale,
+                    shadow_paint,
+                );
+                rim_paint.set_color(badge_rim_color);
+                self.fill_circle(screen_x, screen_y, marker_radius, rim_paint);
+                self.fill_circle(screen_x, screen_y, marker_radius * pin_theme_config.inner_body_scale, badge_paint);
+                highlight_paint.set_color(Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.highlight_alpha).unwrap());
+                self.fill_circle(
+                    screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale,
+                    screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale,
+                    marker_radius * pin_theme_config.highlight_radius_scale,
+                    highlight_paint,
+                );
+            }
+            PinThemeStyle::Pinhead => {
+                let outer_rim_color =
+                    darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.rim_darken);
+                let inner_body_color =
+                    darken_color(parse_hex_color(&self.theme.poi_color), pin_theme_config.inner_body_darken);
+                shadow_paint.set_color(Color::from_rgba(0.0, 0.0, 0.0, pin_theme_config.shadow_alpha).unwrap());
+                self.fill_circle(
+                    screen_x,
+                    screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale,
+                    marker_radius * pin_theme_config.shadow_radius_scale,
+                    shadow_paint,
+                );
+                rim_paint.set_color(outer_rim_color);
+                self.fill_circle(screen_x, screen_y, marker_radius, rim_paint);
+
+                let mut inner_body_paint = Paint::default();
+                inner_body_paint.set_color(inner_body_color);
+                inner_body_paint.anti_alias = true;
+                self.fill_circle(screen_x, screen_y, marker_radius * pin_theme_config.inner_body_scale, &inner_body_paint);
+
+                highlight_paint.set_color(Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.highlight_alpha).unwrap());
+                self.fill_circle(
+                    screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale,
+                    screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale,
+                    marker_radius * pin_theme_config.highlight_radius_scale,
+                    highlight_paint,
+                );
+
+                let mut specular_paint = Paint::default();
+                specular_paint.set_color(
+                    Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.secondary_highlight_alpha).unwrap(),
+                );
+                specular_paint.anti_alias = true;
+                self.fill_circle(
+                    screen_x + marker_radius * pin_theme_config.secondary_highlight_offset_x_scale,
+                    screen_y + marker_radius * pin_theme_config.secondary_highlight_offset_y_scale,
+                    marker_radius * pin_theme_config.secondary_highlight_radius_scale,
+                    &specular_paint,
+                );
+            }
+        }
+    }
+
+    fn draw_gradient_pin_badge(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        marker_radius: f32,
+        pin_theme_config: &PinThemeConfig,
+    ) {
+        let poi_color = parse_hex_color(&self.theme.poi_color);
+        let shadow_base = parse_hex_color(&pin_theme_config.shadow_color);
+
+        match pin_theme_config.style {
+            PinThemeStyle::Puff => {
+                // Layer 1: soft shadow with radial gradient (center → edge fade to transparent)
+                let shadow_y = screen_y + marker_radius * pin_theme_config.shadow_offset_y_scale;
+                let shadow_r = marker_radius * pin_theme_config.shadow_radius_scale * pin_theme_config.shadow_spread;
+                let shadow_center_color = Color::from_rgba(
+                    shadow_base.red(), shadow_base.green(), shadow_base.blue(),
+                    pin_theme_config.shadow_alpha,
+                ).unwrap();
+                let shadow_edge_color = Color::from_rgba(
+                    shadow_base.red(), shadow_base.green(), shadow_base.blue(), 0.0,
+                ).unwrap();
+                self.fill_gradient_circle(
+                    screen_x, shadow_y, shadow_r,
+                    Point::from_xy(screen_x, shadow_y),
+                    shadow_r,
+                    &[
+                        GradientStop::new(0.0, shadow_center_color),
+                        GradientStop::new(1.0, shadow_edge_color),
+                    ],
+                );
+
+                // Layer 2: body sphere with radial gradient (upper-left lighter, lower-right darker)
+                let body_light = lighten_color(poi_color, pin_theme_config.body_lighten);
+                let body_dark = darken_color(poi_color, pin_theme_config.body_darken);
+                let body_grad_center = Point::from_xy(
+                    screen_x + marker_radius * 0.15,
+                    screen_y + marker_radius * -0.15,
+                );
+                let body_grad_r = marker_radius * 1.3;
+                self.fill_gradient_circle(
+                    screen_x, screen_y, marker_radius,
+                    body_grad_center,
+                    body_grad_r,
+                    &[
+                        GradientStop::new(0.0, body_light),
+                        GradientStop::new(0.55, poi_color),
+                        GradientStop::new(1.0, body_dark),
+                    ],
+                );
+
+                // Layer 3: soft highlight with radial gradient (white center → transparent edge)
+                let hl_x = screen_x + marker_radius * pin_theme_config.highlight_offset_x_scale;
+                let hl_y = screen_y + marker_radius * pin_theme_config.highlight_offset_y_scale;
+                let hl_r = marker_radius * pin_theme_config.highlight_radius_scale * pin_theme_config.highlight_spread;
+                self.fill_gradient_circle(
+                    hl_x, hl_y, hl_r,
+                    Point::from_xy(hl_x, hl_y),
+                    hl_r,
+                    &[
+                        GradientStop::new(0.0, Color::from_rgba(1.0, 1.0, 1.0, pin_theme_config.highlight_alpha).unwrap()),
+                        GradientStop::new(1.0, Color::from_rgba(1.0, 1.0, 1.0, 0.0).unwrap()),
+                    ],
+                );
+            }
+            // Other styles fall back to solid rendering for now
+            _ => {
+                let mut shadow_paint = Paint::default();
+                shadow_paint.anti_alias = true;
+                let mut rim_paint = Paint::default();
+                rim_paint.anti_alias = true;
+                let mut highlight_paint = Paint::default();
+                highlight_paint.anti_alias = true;
+                let badge_paint = {
+                    let mut p = Paint::default();
+                    p.set_color(poi_color);
+                    p.anti_alias = true;
+                    p
+                };
+                self.draw_solid_pin_badge(
+                    screen_x,
+                    screen_y,
+                    marker_radius,
+                    pin_theme_config,
+                    &mut shadow_paint,
+                    &badge_paint,
+                    &mut rim_paint,
+                    &mut highlight_paint,
+                );
+            }
+        }
+    }
+
+    fn fill_gradient_circle(
+        &mut self,
+        cx: f32, cy: f32, radius: f32,
+        gradient_center: Point,
+        gradient_radius: f32,
+        stops: &[GradientStop],
+    ) {
+        // Two-point conical gradient: 0 at gradient_center, `gradient_radius` at same point → standard radial
+        let shader = match RadialGradient::new(
+            gradient_center,
+            gradient_center,
+            gradient_radius,
+            stops.to_vec(),
+            SpreadMode::Pad,
+            Transform::identity(),
+        ) {
+            Some(s) => s,
+            None => return,
+        };
+
+        let mut paint = Paint::default();
+        paint.shader = shader;
+        paint.anti_alias = true;
+
+        let mut pb = PathBuilder::new();
+        pb.push_circle(cx, cy, radius);
+        if let Some(path) = pb.finish() {
+            self.pixmap
+                .fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    fn fill_circle(&mut self, x: f32, y: f32, radius: f32, paint: &Paint) {
+        let mut pb = PathBuilder::new();
+        pb.push_circle(x, y, radius);
+        if let Some(path) = pb.finish() {
+            self.pixmap
+                .fill_path(&path, paint, FillRule::Winding, Transform::identity(), None);
+        }
     }
 
     /// 绘制渐变（顶部和底部）
@@ -1239,6 +1653,47 @@ impl MapRenderer {
     }
 }
 
+fn build_custom_poi_icon_path(
+    commands: &[crate::types::CustomPoiPathCommand],
+) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+
+    for command in commands {
+        match command.r#type.as_str() {
+            "M" if command.values.len() == 2 => {
+                builder.move_to(command.values[0], command.values[1]);
+            }
+            "L" if command.values.len() == 2 => {
+                builder.line_to(command.values[0], command.values[1]);
+            }
+            "Q" if command.values.len() == 4 => {
+                builder.quad_to(
+                    command.values[0],
+                    command.values[1],
+                    command.values[2],
+                    command.values[3],
+                );
+            }
+            "C" if command.values.len() == 6 => {
+                builder.cubic_to(
+                    command.values[0],
+                    command.values[1],
+                    command.values[2],
+                    command.values[3],
+                    command.values[4],
+                    command.values[5],
+                );
+            }
+            "Z" if command.values.is_empty() => {
+                builder.close();
+            }
+            _ => return None,
+        }
+    }
+
+    builder.finish()
+}
+
 // ── [Gamma校正] sRGB ↔ 线性光转换工具函数 ────────────────────────────────────
 
 /// [Gamma校正] sRGB -> 线性光（IEC 61966-2-1 标准）
@@ -1284,6 +1739,18 @@ fn darken_color(color: Color, factor: f32) -> Color {
         (color.red() * factor).clamp(0.0, 1.0),
         (color.green() * factor).clamp(0.0, 1.0),
         (color.blue() * factor).clamp(0.0, 1.0),
+        color.alpha(),
+    )
+    .unwrap_or(color)
+}
+
+/// 按比例提亮颜色：factor=0.12 表示向白色混合 12%，保持 alpha 不变
+fn lighten_color(color: Color, factor: f32) -> Color {
+    let inv = 1.0 - factor;
+    Color::from_rgba(
+        (color.red() * inv + factor).clamp(0.0, 1.0),
+        (color.green() * inv + factor).clamp(0.0, 1.0),
+        (color.blue() * inv + factor).clamp(0.0, 1.0),
         color.alpha(),
     )
     .unwrap_or(color)
@@ -1419,6 +1886,7 @@ mod tests {
             text: "#FFFFFF".to_string(),
             gradient_color: "#000000".to_string(),
             poi_color: "#FFFFFF".to_string(),
+            poi_icon_color: "#ffffff".to_string(),
             water: "#00FF00".to_string(),
             parks: "#00AA00".to_string(),
             road_motorway: "#FFFFFF".to_string(),
