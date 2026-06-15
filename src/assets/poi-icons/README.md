@@ -1,6 +1,7 @@
 Place custom POI SVG icons in this directory.
 
 Requirements:
+
 - File name must match the POI type id exactly.
 - Supported names:
   - `cafe.svg`

@@ -196,7 +196,7 @@
 	"custom_poi_api_key_placeholder": "粘贴你的高德 API Key",
 	"custom_poi_api_key_test_button": "测试",
 	"custom_poi_api_key_missing": "请先输入 API Key。",
-	"custom_poi_api_key_valid": "API Key 可用。",
+	"custom_poi_api_key_valid": "API Key 可用",
 	"custom_poi_api_key_invalid": "API Key 校验失败。",
 	"custom_poi_search_label": "搜索地点",
 	"custom_poi_search_help": "输入咖啡店、博物馆、车站或景点等关键词。",

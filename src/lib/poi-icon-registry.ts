@@ -112,8 +112,7 @@ function arcToCubicCommands(
 
   let adjustedRx = Math.abs(rx);
   let adjustedRy = Math.abs(ry);
-  const lambda =
-    (x1p * x1p) / (adjustedRx * adjustedRx) + (y1p * y1p) / (adjustedRy * adjustedRy);
+  const lambda = (x1p * x1p) / (adjustedRx * adjustedRx) + (y1p * y1p) / (adjustedRy * adjustedRy);
   if (lambda > 1) {
     const scale = Math.sqrt(lambda);
     adjustedRx *= scale;
@@ -393,7 +392,9 @@ function parsePathCommands(pathData: string): PoiIconPathCommand[] | null {
         const sweepFlag = readNumber();
         const x = readNumber();
         const y = readNumber();
-        if ([rx, ry, xAxisRotation, largeArcFlag, sweepFlag, x, y].some((value) => value === null)) {
+        if (
+          [rx, ry, xAxisRotation, largeArcFlag, sweepFlag, x, y].some((value) => value === null)
+        ) {
           return null;
         }
 
@@ -443,13 +444,14 @@ function parsePoiIcon(svg: string): PoiIconDefinition | null {
       if (!d) return null;
       const commands = parsePathCommands(d);
       if (!commands) return null;
+      const fillRule = normalizeFillRule(pathElement.getAttribute("fill-rule"));
       return {
         d,
-        fillRule: normalizeFillRule(pathElement.getAttribute("fill-rule")),
+        ...(fillRule ? { fillRule } : {}),
         commands,
-      } satisfies PoiIconPathDefinition;
+      };
     })
-    .filter((item): item is PoiIconPathDefinition => Boolean(item));
+    .filter(Boolean) as PoiIconPathDefinition[];
 
   if (paths.length === 0) return null;
 

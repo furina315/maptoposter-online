@@ -1,8 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { gcj02ToWgs84 } from "@/lib/coordinate-systems";
 import { cn } from "@/lib/utils";
 import { type CustomPOI, POI_TYPE_CATEGORIES } from "@/lib/types";
@@ -12,6 +25,21 @@ import * as m from "@/paraglide/messages";
 const AMAP_PROXY_ENDPOINT = "https://restapi.amap.com";
 const DEFAULT_POI_TYPE = "landmark";
 const MIN_SEARCH_TERM_LENGTH = 2;
+
+const poiIconUrlModules = import.meta.glob("../assets/poi-icons/*.svg", {
+  query: "?url",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
+const poiIconUrlMap: Record<string, string> = {};
+for (const [path, url] of Object.entries(poiIconUrlModules)) {
+  const filename = path
+    .split("/")
+    .pop()
+    ?.replace(/\.svg$/i, "");
+  if (filename) poiIconUrlMap[filename] = url;
+}
 
 interface AmapSearchResult {
   id: string;
@@ -141,14 +169,10 @@ export function POIManagementDialog({
   const normalizedAreaCacheKey = areaCacheKey.trim();
   const cityCodeCacheStorageKey = "maptoposter_amap_citycode_cache";
 
-  const poiOptions = useMemo(
-    () =>
-      POI_TYPE_CATEGORIES.map((item) => ({
-        id: item.id,
-        label: getPoiTypeLabel(item.id),
-      })),
-    []
-  );
+  const poiOptions = POI_TYPE_CATEGORIES.map((item) => ({
+    id: item.id,
+    label: getPoiTypeLabel(item.id),
+  }));
 
   useEffect(() => {
     if (!open) {
@@ -191,9 +215,7 @@ export function POIManagementDialog({
           return;
         }
 
-        const cityCode = String(
-          payload?.regeocode?.addressComponent?.citycode || ""
-        ).trim();
+        const cityCode = String(payload?.regeocode?.addressComponent?.citycode || "").trim();
         if (!cityCode) return;
 
         parsedCache[normalizedAreaCacheKey] = cityCode;
@@ -248,7 +270,9 @@ export function POIManagementDialog({
 
         const pois: AmapSearchResult[] = Array.isArray(payload.pois)
           ? payload.pois
-              .filter((item: any) => typeof item.location === "string" && item.location.includes(","))
+              .filter(
+                (item: any) => typeof item.location === "string" && item.location.includes(",")
+              )
               .map((item: any) => ({
                 id: String(item.id || item.location),
                 name: String(item.name || deferredSearchTerm),
@@ -355,7 +379,12 @@ export function POIManagementDialog({
     const Icon = isSuccess ? CheckCircle2 : XCircle;
 
     return (
-      <p className={cn("flex items-center gap-2 text-xs", isSuccess ? "text-emerald-600" : "text-destructive")}>
+      <p
+        className={cn(
+          "flex items-center gap-2 text-xs",
+          isSuccess ? "text-emerald-600" : "text-destructive"
+        )}
+      >
         <Icon className="h-3.5 w-3.5" />
         <span>{apiKeyMessage}</span>
       </p>
@@ -377,11 +406,7 @@ export function POIManagementDialog({
     }
 
     if (searchStatus === "idle") {
-      return (
-        <p className="text-xs text-muted-foreground">
-          {m.custom_poi_search_idle_hint()}
-        </p>
-      );
+      return <p className="text-xs text-muted-foreground">{m.custom_poi_search_idle_hint()}</p>;
     }
 
     return (
@@ -395,7 +420,10 @@ export function POIManagementDialog({
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-foreground">{result.name}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{result.city || ''} {result.district || ''} {result.address || m.custom_poi_address_missing()}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {result.city || ""} {result.district || ""}{" "}
+                  {result.address || m.custom_poi_address_missing()}
+                </p>
               </div>
               <Button
                 type="button"
@@ -416,7 +444,7 @@ export function POIManagementDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-[75vw] overflow-hidden border-border bg-background p-0">
+      <DialogContent className="max-h-[90vh] max-w-[65vw] overflow-hidden border-border bg-background p-0">
         <DialogHeader className="border-b border-border p-6">
           <DialogTitle>{m.custom_poi_dialog_title()}</DialogTitle>
           <DialogDescription>{m.custom_poi_dialog_description()}</DialogDescription>
@@ -426,7 +454,9 @@ export function POIManagementDialog({
             <div className="space-y-5">
               <div className="space-y-3">
                 <div className="space-y-1">
-                  <h3 className="text-sm font-medium text-foreground">1. {m.custom_poi_api_key_label()}</h3>
+                  <h3 className="text-sm font-medium text-foreground">
+                    1. {m.custom_poi_api_key_label()}
+                  </h3>
                   <p className="text-xs text-muted-foreground">{m.custom_poi_api_key_help()}</p>
                 </div>
                 <div className="flex gap-2">
@@ -437,8 +467,15 @@ export function POIManagementDialog({
                     placeholder={m.custom_poi_api_key_placeholder()}
                     className="border-border bg-card"
                   />
-                  <Button type="button" variant="outline" onClick={handleTestApiKey} disabled={apiKeyStatus === "testing"}>
-                    {apiKeyStatus === "testing" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleTestApiKey}
+                    disabled={apiKeyStatus === "testing"}
+                  >
+                    {apiKeyStatus === "testing" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
                     {m.custom_poi_api_key_test_button()}
                   </Button>
                 </div>
@@ -447,7 +484,9 @@ export function POIManagementDialog({
 
               <div className="space-y-3">
                 <div className="space-y-1">
-                  <h3 className="text-sm font-medium text-foreground">2. {m.custom_poi_search_label()}</h3>
+                  <h3 className="text-sm font-medium text-foreground">
+                    2. {m.custom_poi_search_label()}
+                  </h3>
                   <p className="text-xs text-muted-foreground">
                     {m.custom_poi_search_help()}
                     {/* {resolvedCityCode ? ` Citycode: ${resolvedCityCode}` : ""} */}
@@ -470,7 +509,9 @@ export function POIManagementDialog({
           <section className="px-6 py-2">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm font-medium text-foreground">3. {m.custom_poi_list_title()}</h3>
+                <h3 className="text-sm font-medium text-foreground">
+                  3. {m.custom_poi_list_title()}
+                </h3>
                 <p className="text-xs text-muted-foreground">
                   {m.custom_poi_added_count({ count: String(customPois.length) })}
                 </p>
@@ -478,15 +519,13 @@ export function POIManagementDialog({
             </div>
 
             {customPois.length === 0 ? (
-              <div className="text-xs text-muted-foreground">
-                {m.custom_poi_empty_state()}
-              </div>
+              <div className="text-xs text-muted-foreground">{m.custom_poi_empty_state()}</div>
             ) : (
               <div className="max-h-[420px] overflow-y-auto pr-1 custom-scrollbar">
                 {customPois.map((poi, index) => (
                   <div
                     key={poi.id}
-                    className="grid grid-cols-[minmax(0,1.8fr)_minmax(136px,1fr)_auto] items-center gap-3 border-b border-border py-3"
+                    className="grid grid-cols-[minmax(0,1.5fr)_minmax(148px,1fr)_auto] items-center gap-3 border-b border-border py-3"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-foreground">{poi.name}</p>
@@ -495,14 +534,28 @@ export function POIManagementDialog({
                       </p>
                     </div>
 
-                    <Select value={poi.poiType} onValueChange={(value) => updatePoiType(poi.id, value)}>
+                    <Select
+                      value={poi.poiType}
+                      onValueChange={(value) => updatePoiType(poi.id, value)}
+                    >
                       <SelectTrigger size="sm" className="w-full border-border bg-background">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         {poiOptions.map((option) => (
                           <SelectItem key={option.id} value={option.id}>
-                            {option.label}
+                            <span className="flex items-center gap-2">
+                              {poiIconUrlMap[option.id] ? (
+                                <img
+                                  src={poiIconUrlMap[option.id]}
+                                  className="h-4 w-4 opacity-70"
+                                  alt=""
+                                />
+                              ) : (
+                                <span className="h-4 w-4" />
+                              )}
+                              {option.label}
+                            </span>
                           </SelectItem>
                         ))}
                       </SelectContent>

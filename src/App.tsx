@@ -151,7 +151,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     secondaryHighlightOffsetXScale: 0,
     secondaryHighlightOffsetYScale: 0,
     secondaryHighlightRadiusScale: 0,
-    innerShadowAlpha: 0.10,
+    innerShadowAlpha: 0.1,
     innerShadowOffsetYScale: 0.22,
     innerShadowRadiusScale: 0.78,
   },
@@ -161,18 +161,18 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     iconScale: 0.78,
     fallbackDotScale: 0.28,
     // 阴影：扁平徽章，阴影小而实，不飘
-    shadowAlpha: 0.22,              // 0.18→0.22，徽章阴影清晰
-    shadowOffsetYScale: 0.14,       // 0.18→0.14，偏移略小
-    shadowRadiusScale: 0.60,        // 1.0→0.60，硬质阴影，收紧
+    shadowAlpha: 0.22, // 0.18→0.22，徽章阴影清晰
+    shadowOffsetYScale: 0.14, // 0.18→0.14，偏移略小
+    shadowRadiusScale: 0.6, // 1.0→0.60，硬质阴影，收紧
     // 边缘：压制感，像冲压金属边缘
-    rimDarken: 0.60,                // 0.74→0.60，边缘明显更暗
-    innerBodyDarken: 0.82,          // 0.9→0.82，内层主体明显压暗，凹入感
+    rimDarken: 0.6, // 0.74→0.60，边缘明显更暗
+    innerBodyDarken: 0.82, // 0.9→0.82，内层主体明显压暗，凹入感
     innerBodyScale: 0.88,
     // 高光：极小且弱，接近哑光珐琅，仅有轻微光泽
-    highlightAlpha: 0.10,           // 0.20→0.10，哑光不该有强高光
+    highlightAlpha: 0.1, // 0.20→0.10，哑光不该有强高光
     highlightOffsetXScale: -0.14,
     highlightOffsetYScale: -0.26,
-    highlightRadiusScale: 0.32,     // 0.48→0.32，高光很小很紧
+    highlightRadiusScale: 0.32, // 0.48→0.32，高光很小很紧
     // 次级高光：无
     secondaryHighlightAlpha: 0,
     secondaryHighlightOffsetXScale: 0,
@@ -196,23 +196,23 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     iconScale: 0.78,
     fallbackDotScale: 0.28,
     // 阴影：硬质球体投影，清晰
-    shadowAlpha: 0.24,              // 0.20→0.24
+    shadowAlpha: 0.24, // 0.20→0.24
     shadowOffsetYScale: 0.18,
-    shadowRadiusScale: 0.80,        // 0.96→0.80，玻璃球阴影较实
+    shadowRadiusScale: 0.8, // 0.96→0.80，玻璃球阴影较实
     // 边缘：玻璃球边缘暗部很重，折射造成深色边圈
-    rimDarken: 0.44,                // 0.62→0.44，边缘显著更暗
-    innerBodyDarken: 0.92,          // 0.9→0.92，内部略微暗，背景色透过玻璃
-    innerBodyScale: 0.90,           // 0.88→0.90
+    rimDarken: 0.44, // 0.62→0.44，边缘显著更暗
+    innerBodyDarken: 0.92, // 0.9→0.92，内部略微暗，背景色透过玻璃
+    innerBodyScale: 0.9, // 0.88→0.90
     // 主高光：强且集中，镜面反射点，偏左上
-    highlightAlpha: 0.38,           // 0.26→0.38，玻璃主高光要强
-    highlightOffsetXScale: -0.22,   // -0.18→-0.22
-    highlightOffsetYScale: -0.32,   // -0.28→-0.32，更偏顶部
-    highlightRadiusScale: 0.28,     // 0.42→0.28，高光小且集中，镜面感
+    highlightAlpha: 0.38, // 0.26→0.38，玻璃主高光要强
+    highlightOffsetXScale: -0.22, // -0.18→-0.22
+    highlightOffsetYScale: -0.32, // -0.28→-0.32，更偏顶部
+    highlightRadiusScale: 0.28, // 0.42→0.28，高光小且集中，镜面感
     // 次级高光：右下环境光反射，玻璃球特有
-    secondaryHighlightAlpha: 0.20,  // 0.14→0.20，加强，模拟底部透光
+    secondaryHighlightAlpha: 0.2, // 0.14→0.20，加强，模拟底部透光
     secondaryHighlightOffsetXScale: 0.16, // 0.10→0.16，更偏右
     secondaryHighlightOffsetYScale: 0.14, // 0.08→0.14，更偏下
-    secondaryHighlightRadiusScale: 0.48,  // 0.62→0.48，比主高光大但仍集中
+    secondaryHighlightRadiusScale: 0.48, // 0.62→0.48，比主高光大但仍集中
     // 内阴影：无
     innerShadowAlpha: 0,
     innerShadowOffsetYScale: 0,
@@ -1326,9 +1326,16 @@ export default function MapPosterGenerator() {
         runInWorker(workers[1 % numWorkers], "polygons", parksTyped, [parksTyped.buffer], "parks"),
       ]);
       // 用户关闭 POI 时跳过 worker 处理，直接构造空数组（WASM 会跳过渲染）
-      const poisBin = poiSource === "overpass"
-        ? await runInWorker(workers[2 % numWorkers], "pois", poisTyped, [poisTyped.buffer], "pois")
-        : new Float64Array([0]);
+      const poisBin =
+        poiSource === "overpass"
+          ? await runInWorker(
+              workers[2 % numWorkers],
+              "pois",
+              poisTyped,
+              [poisTyped.buffer],
+              "pois"
+            )
+          : new Float64Array([0]);
       logClientTiming("processing", "wasmAll", { total: performance.now() - wasmProcessingStart });
 
       // 数据处理完成

@@ -15,7 +15,6 @@ interface CustomPOISettingsProps {
 
 export function CustomPOISettings({
   customPoiCount,
-  poiSourceLabel,
   poiSource,
   onManageClick,
   onPoiSourceChange,
@@ -56,19 +55,25 @@ export function CustomPOISettings({
             ))}
           </div>
         </div>
-        {poiSource === 'custom' && <div className="flex flex-wrap items-center justify-between gap-2 border border-border/70 bg-secondary/20 p-2">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm text-foreground">
-              <MapPinned className="h-4 w-4 text-primary" />
-              <span>{m.custom_poi_added_count({ count: String(customPoiCount) })}</span>
+        {poiSource === "custom" && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border border-border/70 bg-secondary/20 p-2">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-sm text-foreground">
+                <MapPinned className="h-4 w-4 text-primary" />
+                <span>{m.custom_poi_added_count({ count: String(customPoiCount) })}</span>
+              </div>
             </div>
+            <Button type="button" onClick={onManageClick}>
+              {m.custom_poi_manage_button()}
+            </Button>
           </div>
-          <Button type="button" onClick={onManageClick}>
-            {m.custom_poi_manage_button()}
-          </Button>
-        </div>}
+        )}
         <p className="text-[12px] italic text-muted-foreground">
-          {poiSource === "off" ? m.poi_hint_off() : poiSource === "overpass" ? m.poi_hint_overpass() : m.poi_hint_custom()}
+          {poiSource === "off"
+            ? m.poi_hint_off()
+            : poiSource === "overpass"
+              ? m.poi_hint_overpass()
+              : m.poi_hint_custom()}
         </p>
       </div>
     </Card>
