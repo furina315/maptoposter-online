@@ -99,12 +99,15 @@ pub struct PinThemeConfig {
     pub shadow_spread: f32,
     #[serde(default = "default_shadow_color")]
     pub shadow_color: String,
+    #[serde(default = "default_poi_ratio")]
+    pub poi_ratio: f32,
 }
 
 fn default_body_lighten() -> f32 { 0.12 }
 fn default_body_darken() -> f32 { 0.85 }
 fn default_highlight_spread() -> f32 { 1.0 }
 fn default_shadow_spread() -> f32 { 1.2 }
+fn default_poi_ratio() -> f32 { 0.016 }
 fn default_shadow_color() -> String { "#000000".into() }
 
 pub fn default_pin_theme_config() -> PinThemeConfig {
@@ -135,6 +138,7 @@ pub fn default_pin_theme_config() -> PinThemeConfig {
         highlight_spread: 1.0,
         shadow_spread: 1.2,
         shadow_color: "#000000".into(),
+        poi_ratio: 0.016,
     }
 }
 

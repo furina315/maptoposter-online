@@ -355,8 +355,7 @@ fn render_map_binary_internal(
             }
 
             time("render_map_bin: draw_custom_pois");
-            let poi_scale = config.frontend_scale / 2.0;
-            renderer.draw_custom_pois(&projected_pois, poi_scale, &config.pin_theme_config);
+            renderer.draw_custom_pois(&projected_pois, &config.pin_theme_config);
             time_end("render_map_bin: draw_custom_pois");
         }
     } else if let Some(pois_data) = &config.pois {
@@ -374,7 +373,7 @@ fn render_map_binary_internal(
             }
 
             time("render_map_bin: draw_pois");
-            renderer.draw_pois_bin(&projected_pois);
+            renderer.draw_pois_bin(&projected_pois, config.pin_theme_config.poi_ratio);
             time_end("render_map_bin: draw_pois");
         }
     }
@@ -479,8 +478,7 @@ fn render_map_binary_svg(
                 poi.lat = proj_lat;
             }
             time("render_map_bin: draw_custom_pois");
-            let poi_scale = config.frontend_scale / 2.0;
-            renderer.draw_custom_pois(&projected_pois, poi_scale, &config.pin_theme_config);
+            renderer.draw_custom_pois(&projected_pois, &config.pin_theme_config);
             time_end("render_map_bin: draw_custom_pois");
         }
     } else if let Some(pois_data) = &config.pois {
@@ -495,7 +493,7 @@ fn render_map_binary_svg(
                 projected_pois[offset + 1] = proj_lat;
             }
             time("render_map_bin: draw_pois");
-            renderer.draw_pois_bin_scaled(&projected_pois, 1.0);
+            renderer.draw_pois_bin_scaled(&projected_pois, config.pin_theme_config.poi_ratio);
             time_end("render_map_bin: draw_pois");
         }
     }
@@ -619,7 +617,7 @@ fn render_map_internal(mut request: RenderRequest) -> RenderResult {
     // 绘制 POI
     if !request.pois.is_empty() {
         time("render_map: draw_pois");
-        renderer.draw_pois(&request.pois);
+        renderer.draw_pois(&request.pois, 0.016);
         time_end("render_map: draw_pois");
     }
 

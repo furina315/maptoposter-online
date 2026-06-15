@@ -181,7 +181,7 @@ impl SvgRenderer {
         timings
     }
 
-    pub fn draw_pois_bin_scaled(&mut self, data: &[f64], scale_factor: f32) {
+    pub fn draw_pois_bin_scaled(&mut self, data: &[f64], poi_ratio: f32) {
         if data.is_empty() || data[0] as usize == 0 {
             return;
         }
@@ -191,8 +191,9 @@ impl SvgRenderer {
             return;
         }
 
-        let poi_radius = 10.0 * scale_factor;
-        let min_spacing = 5.0 * scale_factor;
+        let short_side = self.width.min(self.height) as f32;
+        let poi_radius = short_side * poi_ratio * 0.5;
+        let min_spacing = poi_radius * 0.25;
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
         let cell_size = ((poi_radius * 2.0 + min_spacing).ceil() as i32).max(1);
         let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
@@ -258,16 +259,16 @@ impl SvgRenderer {
     pub fn draw_custom_pois(
         &mut self,
         pois: &[crate::types::CustomPOI],
-        scale_factor: f32,
         pin_theme_config: &PinThemeConfig,
     ) {
         if pois.is_empty() {
             return;
         }
 
-        let marker_diameter = 40.0 * scale_factor;
+        let short_side = self.width.min(self.height) as f32;
+        let marker_diameter = short_side * pin_theme_config.poi_ratio;
         let marker_radius = marker_diameter * 0.5;
-        let min_spacing = 5.0 * scale_factor;
+        let min_spacing = 5.0;
         let min_distance_sq = (marker_diameter + min_spacing) * (marker_diameter + min_spacing);
         let cell_size = ((marker_diameter + min_spacing).ceil() as i32).max(1);
         let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();

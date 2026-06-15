@@ -464,25 +464,22 @@ impl MapRenderer {
     }
 
     /// 绘制 POI 圆点（使用 POI 结构体数组）
-    pub fn draw_pois(&mut self, pois: &[crate::types::POI]) {
-        // 【优化】委托给 scaled 版本，消除重复代码；scale_factor=1.0 等同于原无缩放行为
-        self.draw_pois_scaled(pois, 1.0);
+    pub fn draw_pois(&mut self, pois: &[crate::types::POI], poi_ratio: f32) {
+        // 【优化】委托给 scaled 版本，消除重复代码
+        self.draw_pois_scaled(pois, poi_ratio);
     }
 
-    /// 绘制 POI 圆点（使用 POI 结构体数组，带动态缩放因子）
-    pub fn draw_pois_scaled(&mut self, pois: &[crate::types::POI], scale_factor: f32) {
+    /// 绘制 POI 圆点（使用 POI 结构体数组，带画布比例缩放）
+    pub fn draw_pois_scaled(&mut self, pois: &[crate::types::POI], poi_ratio: f32) {
         if pois.is_empty() {
             return;
         }
 
-        // [超采样] 缩放因子乘以内部渲染倍数，保持圆点视觉大小与逻辑尺寸一致
-        let scale_factor = scale_factor * self.render_scale as f32;
-
-        // 使用主题中的 POI 专用颜色
+        let render_scale = self.render_scale as f32;
+        let short_side = self.width.min(self.height) as f32;
         let poi_color = parse_hex_color(&self.theme.poi_color);
-
-        let poi_radius = 20.0 * scale_factor;
-        let min_spacing = 8.0 * scale_factor; // POI 之间最小间距（像素）
+        let poi_radius = short_side * poi_ratio * 0.5 * render_scale;
+        let min_spacing = poi_radius * 0.4;
         const MAX_POIS: usize = 50; // 最多渲染 50 个 POI 点
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
 
@@ -560,20 +557,20 @@ impl MapRenderer {
 
     /// 绘制 POI 圆点（二进制直读版本）
     /// 数据格式：[poi_count, x1, y1, x2, y2, ...]
-    pub fn draw_pois_bin(&mut self, data: &[f64]) {
-        // 【优化】委托给 scaled 版本，消除重复代码；scale_factor=1.0 等同于原无缩放行为
-        self.draw_pois_bin_scaled(data, 1.0);
+    pub fn draw_pois_bin(&mut self, data: &[f64], poi_ratio: f32) {
+        self.draw_pois_bin_scaled(data, poi_ratio);
     }
 
-    /// 绘制 POI 圆点（二进制直读版本，带动态缩放因子）
+    /// 绘制 POI 圆点（二进制直读版本，带画布比例缩放）
     /// 数据格式：[poi_count, x1, y1, x2, y2, ...]
-    pub fn draw_pois_bin_scaled(&mut self, data: &[f64], scale_factor: f32) {
+    pub fn draw_pois_bin_scaled(&mut self, data: &[f64], poi_ratio: f32) {
         if data.is_empty() || data[0] as usize == 0 {
             return;
         }
 
-        // [超采样] 缩放因子乘以内部渲染倍数，保持 POI 视觉大小一致
-        let scale_factor = scale_factor * self.render_scale as f32;
+        let render_scale = self.render_scale as f32;
+        let short_side = self.width.min(self.height) as f32;
+        let poi_radius = short_side * poi_ratio * 0.5 * render_scale;
 
         let poi_count = data[0] as usize;
         if data.len() < 1 + poi_count * 2 {
@@ -592,8 +589,7 @@ impl MapRenderer {
         // 使用主题中的 POI 专用颜色
         let poi_color = parse_hex_color(&self.theme.poi_color);
 
-        let poi_radius = 20.0 * scale_factor;
-        let min_spacing = 5.0 * scale_factor; // POI 之间最小间距随分辨率缩放
+        let min_spacing = poi_radius * 0.25;
         const MAX_POIS: usize = 50;
         let min_distance_sq = (poi_radius * 2.0 + min_spacing) * (poi_radius * 2.0 + min_spacing);
 
@@ -681,24 +677,17 @@ impl MapRenderer {
         );
     }
 
-    pub fn draw_custom_pois(&mut self, pois: &[crate::types::CustomPOI], scale: f32, pin_theme_config: &PinThemeConfig) {
-        self.draw_custom_pois_scaled(pois, scale, pin_theme_config);
-    }
-
-    pub fn draw_custom_pois_scaled(
-        &mut self,
-        pois: &[crate::types::CustomPOI],
-        scale_factor: f32,
-        pin_theme_config: &PinThemeConfig,
-    ) {
+    pub fn draw_custom_pois(&mut self, pois: &[crate::types::CustomPOI], pin_theme_config: &PinThemeConfig) {
         if pois.is_empty() {
             return;
         }
 
-        let scale_factor = scale_factor * self.render_scale as f32;
+        let render_scale = self.render_scale as f32;
+        let short_side = self.width.min(self.height) as f32;
+        let marker_diameter = short_side * pin_theme_config.poi_ratio;
+        let marker_radius = marker_diameter * 0.5 * render_scale;
+        let min_spacing = 8.0 * render_scale;
         let poi_color = parse_hex_color(&self.theme.poi_color);
-        let marker_radius = 20.0 * scale_factor;
-        let min_spacing = 8.0 * scale_factor;
         let min_distance_sq = (marker_radius * 2.0 + min_spacing) * (marker_radius * 2.0 + min_spacing);
         let cell_size = ((marker_radius * 2.0 + min_spacing).ceil() as i32).max(1);
         let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();

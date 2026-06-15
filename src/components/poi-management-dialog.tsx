@@ -9,7 +9,7 @@ import { type CustomPOI, POI_TYPE_CATEGORIES } from "@/lib/types";
 import { ArrowUp, CheckCircle2, Loader2, Plus, Search, Trash2, XCircle } from "lucide-react";
 import * as m from "@/paraglide/messages";
 
-const AMAP_PROXY_ENDPOINT = "https://amap-proxy.heguanjie123.workers.dev";
+const AMAP_PROXY_ENDPOINT = "https://restapi.amap.com";
 const DEFAULT_POI_TYPE = "landmark";
 const MIN_SEARCH_TERM_LENGTH = 2;
 
@@ -426,7 +426,7 @@ export function POIManagementDialog({
             <div className="space-y-5">
               <div className="space-y-3">
                 <div className="space-y-1">
-                  <h3 className="text-sm font-medium text-foreground">{m.custom_poi_api_key_label()}</h3>
+                  <h3 className="text-sm font-medium text-foreground">1. {m.custom_poi_api_key_label()}</h3>
                   <p className="text-xs text-muted-foreground">{m.custom_poi_api_key_help()}</p>
                 </div>
                 <div className="flex gap-2">
@@ -447,7 +447,7 @@ export function POIManagementDialog({
 
               <div className="space-y-3">
                 <div className="space-y-1">
-                  <h3 className="text-sm font-medium text-foreground">{m.custom_poi_search_label()}</h3>
+                  <h3 className="text-sm font-medium text-foreground">2. {m.custom_poi_search_label()}</h3>
                   <p className="text-xs text-muted-foreground">
                     {m.custom_poi_search_help()}
                     {/* {resolvedCityCode ? ` Citycode: ${resolvedCityCode}` : ""} */}
@@ -468,9 +468,9 @@ export function POIManagementDialog({
           </section>
 
           <section className="px-6 py-2">
-            <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm font-medium text-foreground">{m.custom_poi_list_title()}</h3>
+                <h3 className="text-sm font-medium text-foreground">3. {m.custom_poi_list_title()}</h3>
                 <p className="text-xs text-muted-foreground">
                   {m.custom_poi_added_count({ count: String(customPois.length) })}
                 </p>

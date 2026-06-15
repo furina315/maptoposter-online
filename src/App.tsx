@@ -115,6 +115,8 @@ interface PinThemeConfig {
   shadowSpread: number;
   // 阴影颜色（hex，默认 #000000）
   shadowColor: string;
+  // POI 直径占海报短边的比例
+  poiRatio: number;
 }
 
 // Internal-only marker theme switch.
@@ -131,6 +133,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     shadowRadiusScale: 0.92,
     shadowSpread: 1.2,
     shadowColor: "#000000",
+    poiRatio: 0.016,
     bodyLighten: 0.12,
     bodyDarken: 0.85,
     highlightAlpha: 0.32,
@@ -138,7 +141,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     highlightOffsetYScale: -0.28,
     highlightRadiusScale: 0.72,
     highlightSpread: 1.0,
-    iconScale: 0.7,
+    iconScale: 0.65,
     fallbackDotScale: 0.28,
     // --- solid-only fallback (dead when gradientEnabled=true) ---
     rimDarken: 0.82,
@@ -185,6 +188,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     highlightSpread: 1.0,
     shadowSpread: 1.2,
     shadowColor: "#000000",
+    poiRatio: 0.016,
   },
 
   pinhead: {
@@ -219,6 +223,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, PinThemeConfig> = {
     highlightSpread: 1.0,
     shadowSpread: 1.2,
     shadowColor: "#000000",
+    poiRatio: 0.016,
   },
 };
 const INTERNAL_PIN_THEME_CONFIG = INTERNAL_PIN_THEME_CONFIGS[INTERNAL_PIN_THEME_STYLE];
@@ -1370,7 +1375,11 @@ export default function MapPosterGenerator() {
         show_country: showCountry,
         export_format: exportFormat,
         svg_font_mode: "embed",
-        pin_theme_config: INTERNAL_PIN_THEME_CONFIG,
+        pin_theme_config: {
+          ...INTERNAL_PIN_THEME_CONFIG,
+          // 选择自动时，因为没有icon，所以需要更小的poi圆点
+          poiRatio: poiSource === "overpass" ? 0.008 : INTERNAL_PIN_THEME_CONFIG.poiRatio,
+        },
       };
       logClientTiming("processing", "prepareRenderConfig", {
         total: performance.now() - configStart,
@@ -1515,14 +1524,14 @@ export default function MapPosterGenerator() {
         label: m.theme_colors(),
       },
       {
-        id: "section-text-display",
-        icon: <Eye className="w-5 h-5" />,
-        label: m.render_control(),
-      },
-      {
         id: "section-custom-pois",
         icon: <Pin className="w-5 h-5" />,
         label: m.custom_poi_nav_label(),
+      },
+      {
+        id: "section-text-display",
+        icon: <Eye className="w-5 h-5" />,
+        label: m.render_control(),
       },
       {
         id: "section-font-settings",
@@ -1663,24 +1672,24 @@ export default function MapPosterGenerator() {
                   />
                 </div>
 
+                <div id="section-custom-pois" ref={setSectionRef("section-custom-pois")}>
+                  <CustomPOISettings
+                    customPoiCount={customPois.length}
+                    poiSourceLabel={poiSourceLabel}
+                    poiSource={poiSource}
+                    onManageClick={() => setIsPoiDialogOpen(true)}
+                    onPoiSourceChange={setPoiSource}
+                  />
+                </div>
+
                 <div id="section-text-display" ref={setSectionRef("section-text-display")}>
                   <RenderControlSettings
                     showCoords={showCoords}
                     showCity={showCity}
                     showCountry={showCountry}
-                    poiSource={poiSource}
                     onShowCoordsChange={setShowCoords}
                     onShowCityChange={setShowCity}
                     onShowCountryChange={setShowCountry}
-                    onPoiSourceChange={setPoiSource}
-                  />
-                </div>
-
-                <div id="section-custom-pois" ref={setSectionRef("section-custom-pois")}>
-                  <CustomPOISettings
-                    customPoiCount={customPois.length}
-                    poiSourceLabel={poiSourceLabel}
-                    onManageClick={() => setIsPoiDialogOpen(true)}
                   />
                 </div>
 
