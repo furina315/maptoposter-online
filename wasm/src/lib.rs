@@ -137,6 +137,8 @@ pub struct BinaryRenderConfig {
     pub show_city: bool,
     #[serde(default = "types::default_true")]
     pub show_country: bool,
+    #[serde(default = "types::default_true")]
+    pub enable_road_mask_optimization: bool,
     #[serde(default)]
     pub export_format: Option<String>,
     #[serde(default)]
@@ -295,14 +297,16 @@ fn render_map_binary_internal(
         config.road_width_boost,
     );
 
-    let mut total_timings = [0.0; 6];
-
-    for shard in &road_shards {
-        let timings = renderer.draw_roads_bin_scaled(shard.as_slice(), road_width_scale);
-        for i in 0..6 {
-            total_timings[i] += timings[i];
-        }
-    }
+    let total_timings = if config.enable_road_mask_optimization {
+        renderer.draw_road_shards_masked_by_terrain_scaled(
+            &road_shards,
+            water_bin,
+            parks_bin,
+            road_width_scale,
+        )
+    } else {
+        renderer.draw_road_shards_scaled(&road_shards, road_width_scale)
+    };
 
     time_end("render_map_bin: draw_roads");
 
@@ -407,22 +411,17 @@ fn render_map_binary_svg(
         config.road_width_boost,
     );
 
-    let mut total_timings = [0.0; 6];
-
-    if js_sys::Array::is_array(&roads_shards) {
-        let shards_array = js_sys::Array::from(&roads_shards);
-        for shard_val in shards_array.iter() {
-            if let Some(shard_typed) = shard_val.dyn_ref::<js_sys::Float64Array>() {
-                let timings =
-                    renderer.draw_roads_bin_scaled(&shard_typed.to_vec(), road_width_scale);
-                for i in 0..6 {
-                    total_timings[i] += timings[i];
-                }
-            }
-        }
-    } else if let Some(shard_typed) = roads_shards.dyn_ref::<js_sys::Float64Array>() {
-        total_timings = renderer.draw_roads_bin_scaled(&shard_typed.to_vec(), road_width_scale);
-    }
+    let collected_road_shards = collect_road_shards(&roads_shards);
+    let total_timings = if config.enable_road_mask_optimization {
+        renderer.draw_road_shards_masked_by_terrain_scaled(
+            &collected_road_shards,
+            water_bin,
+            parks_bin,
+            road_width_scale,
+        )
+    } else {
+        renderer.draw_road_shards_scaled(&collected_road_shards, road_width_scale)
+    };
 
     time_end("render_map_bin: draw_roads");
 

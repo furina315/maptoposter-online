@@ -175,6 +175,7 @@
 	"toggle_show_city": "城市名称",
 	"toggle_show_country": "国家名称",
 	"toggle_show_coords": "经纬度坐标",
+	"toggle_road_mask_optimization": "道路避开水体、公园和绿地",
 	"toggle_show_pois": "兴趣点 (POI)",
 	"poi_source_off": "关闭",
 	"poi_source_overpass": "自动",

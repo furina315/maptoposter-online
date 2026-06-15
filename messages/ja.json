@@ -175,6 +175,7 @@
 	"toggle_show_city": "都市名",
 	"toggle_show_country": "国名",
 	"toggle_show_coords": "座標",
+	"toggle_road_mask_optimization": "水域・公園・緑地の上に道路を表示しない",
 	"toggle_show_pois": "スポット (POI)",
 	"poi_source_off": "オフ",
 	"poi_source_overpass": "自動",

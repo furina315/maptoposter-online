@@ -175,6 +175,7 @@
 	"toggle_show_city": "도시 이름",
 	"toggle_show_country": "국가 이름",
 	"toggle_show_coords": "좌표",
+	"toggle_road_mask_optimization": "물, 공원, 녹지 위의 도로 숨기기",
 	"toggle_show_pois": "관심 지점 (POI)",
 	"poi_source_off": "끄기",
 	"poi_source_overpass": "자동",

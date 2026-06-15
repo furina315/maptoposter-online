@@ -6,23 +6,32 @@ interface RenderControlSettingsProps {
   showCoords: boolean;
   showCity: boolean;
   showCountry: boolean;
+  enableRoadMaskOptimization: boolean;
   onShowCoordsChange: (val: boolean) => void;
   onShowCityChange: (val: boolean) => void;
   onShowCountryChange: (val: boolean) => void;
+  onEnableRoadMaskOptimizationChange: (val: boolean) => void;
 }
 
 export function RenderControlSettings({
   showCoords,
   showCity,
   showCountry,
+  enableRoadMaskOptimization,
   onShowCoordsChange,
   onShowCityChange,
   onShowCountryChange,
+  onEnableRoadMaskOptimizationChange,
 }: RenderControlSettingsProps) {
   const textToggles = [
     { checked: showCity, onChange: onShowCityChange, label: m.toggle_show_city() },
     { checked: showCountry, onChange: onShowCountryChange, label: m.toggle_show_country() },
     { checked: showCoords, onChange: onShowCoordsChange, label: m.toggle_show_coords() },
+    {
+      checked: enableRoadMaskOptimization,
+      onChange: onEnableRoadMaskOptimizationChange,
+      label: m.toggle_road_mask_optimization(),
+    },
   ];
 
   return (

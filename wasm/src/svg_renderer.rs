@@ -60,41 +60,7 @@ impl SvgRenderer {
             return;
         }
 
-        let mut offset = 1;
-        let poly_count = data[0] as usize;
-        let mut d = String::new();
-
-        for _ in 0..poly_count {
-            if offset + 2 > data.len() {
-                break;
-            }
-            let ext_count = data[offset] as usize;
-            let int_ring_count = data[offset + 1] as usize;
-            offset += 2;
-
-            if offset + ext_count * 2 <= data.len() && ext_count >= 3 {
-                push_ring_path(&mut d, data, offset, ext_count, |coord| {
-                    self.world_to_screen(coord)
-                });
-            }
-            offset += ext_count * 2;
-
-            for _ in 0..int_ring_count {
-                if offset + 1 > data.len() {
-                    break;
-                }
-                let count = data[offset] as usize;
-                offset += 1;
-                if offset + count * 2 <= data.len() && count >= 3 {
-                    push_ring_path(&mut d, data, offset, count, |coord| {
-                        self.world_to_screen(coord)
-                    });
-                }
-                offset += count * 2;
-            }
-        }
-
-        if !d.is_empty() {
+        for d in self.build_polygon_path_data_list(data) {
             self.svg.push_str(&format!(
                 r#"<path d="{d}" fill="{}" fill-rule="evenodd"/>"#,
                 escape_attr(color_hex)
@@ -112,63 +78,130 @@ impl SvgRenderer {
             return;
         }
 
-        let parks_d = self.build_polygon_path_data(parks_data);
-        if parks_d.is_empty() {
+        let park_paths = self.build_polygon_path_data_list(parks_data);
+        if park_paths.is_empty() {
             return;
         }
 
-        let water_d = self.build_polygon_path_data(water_data);
-        if water_d.is_empty() {
-            self.svg.push_str(&format!(
-                r#"<path d="{parks_d}" fill="{}" fill-rule="evenodd"/>"#,
-                escape_attr(color_hex)
-            ));
+        let water_paths = self.build_polygon_path_data_list(water_data);
+        if water_paths.is_empty() {
+            for parks_d in park_paths {
+                self.svg.push_str(&format!(
+                    r#"<path d="{parks_d}" fill="{}" fill-rule="evenodd"/>"#,
+                    escape_attr(color_hex)
+                ));
+            }
             return;
         }
 
         let mask_id = format!("m{}", self.next_mask_id);
         self.next_mask_id += 1;
+        let water_mask_content = water_paths
+            .iter()
+            .map(|d| format!(r#"<path d="{d}" fill="black" fill-rule="evenodd"/>"#))
+            .collect::<String>();
         self.svg.push_str(&format!(
-            r#"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="0" y="0" width="{}" height="{}"><rect x="0" y="0" width="{}" height="{}" fill="white"/><path d="{water_d}" fill="black" fill-rule="evenodd"/></mask></defs>"#,
+            r#"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="0" y="0" width="{}" height="{}"><rect x="0" y="0" width="{}" height="{}" fill="white"/>{water_mask_content}</mask></defs>"#,
             self.width,
             self.height,
             self.width,
             self.height
         ));
-        self.svg.push_str(&format!(
-            r#"<path d="{parks_d}" fill="{}" fill-rule="evenodd" mask="url(#{mask_id})"/>"#,
-            escape_attr(color_hex)
-        ));
+        for parks_d in park_paths {
+            self.svg.push_str(&format!(
+                r#"<path d="{parks_d}" fill="{}" fill-rule="evenodd" mask="url(#{mask_id})"/>"#,
+                escape_attr(color_hex)
+            ));
+        }
     }
 
-    pub fn draw_roads_bin_scaled(&mut self, data: &[f64], scale_factor: f32) -> [f64; 6] {
-        if data.is_empty() {
+    pub fn draw_road_shards_masked_by_terrain_scaled(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        water_data: &[f64],
+        parks_data: &[f64],
+        scale_factor: f32,
+    ) -> [f64; 6] {
+        if road_shards.is_empty() {
             return [0.0; 6];
         }
 
         let mut timings = [0.0; 6];
         let scale_factor = scale_factor.max(0.0);
-        let road_count = data[0] as usize;
-        let mut paths: [String; 6] = std::array::from_fn(|_| String::new());
-        let mut offset = 1;
+        let mut terrain_paths = self.build_polygon_path_data_list(water_data);
+        terrain_paths.extend(self.build_polygon_path_data_list(parks_data));
 
-        for _ in 0..road_count {
-            if offset + 2 > data.len() {
-                break;
-            }
-            let t = data[offset] as usize;
-            let count = data[offset + 1] as usize;
-            offset += 2;
+        let mask_id = if terrain_paths.is_empty() {
+            None
+        } else {
+            let mask_id = format!("m{}", self.next_mask_id);
+            self.next_mask_id += 1;
+            let terrain_mask_content = terrain_paths
+                .iter()
+                .map(|d| format!(r#"<path d="{d}" fill="black" fill-rule="evenodd"/>"#))
+                .collect::<String>();
+            self.svg.push_str(&format!(
+                r#"<defs><mask id="{mask_id}" maskUnits="userSpaceOnUse" x="0" y="0" width="{}" height="{}"><rect x="0" y="0" width="{}" height="{}" fill="white"/>{terrain_mask_content}</mask></defs>"#,
+                self.width,
+                self.height,
+                self.width,
+                self.height
+            ));
+            Some(mask_id)
+        };
 
-            if t < 6 && offset + count * 2 <= data.len() && count >= 2 {
-                let coords: Vec<(f32, f32)> = (0..count)
-                    .map(|i| self.world_to_screen((data[offset + i * 2], data[offset + i * 2 + 1])))
-                    .collect();
-                let simplified = simplify_screen_coords(&coords, 0.25);
-                push_line_path(&mut paths[t], &simplified);
+        let mut combined_paths: [String; 6] = std::array::from_fn(|_| String::new());
+        for shard in road_shards {
+            if shard.is_empty() {
+                continue;
             }
-            offset += count * 2;
+            let shard_paths = self.build_road_path_data(shard);
+            for i in 0..6 {
+                combined_paths[i].push_str(&shard_paths[i]);
+            }
         }
+
+        self.draw_road_paths(&combined_paths, scale_factor, mask_id.as_deref(), &mut timings);
+
+        timings
+    }
+
+    pub fn draw_road_shards_scaled(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        scale_factor: f32,
+    ) -> [f64; 6] {
+        if road_shards.is_empty() {
+            return [0.0; 6];
+        }
+
+        let mut timings = [0.0; 6];
+        let scale_factor = scale_factor.max(0.0);
+        let mut combined_paths: [String; 6] = std::array::from_fn(|_| String::new());
+        for shard in road_shards {
+            if shard.is_empty() {
+                continue;
+            }
+            let shard_paths = self.build_road_path_data(shard);
+            for i in 0..6 {
+                combined_paths[i].push_str(&shard_paths[i]);
+            }
+        }
+
+        self.draw_road_paths(&combined_paths, scale_factor, None, &mut timings);
+        timings
+    }
+
+    fn draw_road_paths(
+        &mut self,
+        paths: &[String; 6],
+        scale_factor: f32,
+        mask_id: Option<&str>,
+        timings: &mut [f64; 6],
+    ) {
+        let mask_attr = mask_id
+            .map(|id| format!(r#" mask="url(#{id})""#))
+            .unwrap_or_default();
 
         const DRAW_ORDER: [usize; 6] = [5, 4, 3, 2, 1, 0];
         let path_ids: [Option<String>; 6] = std::array::from_fn(|idx| {
@@ -193,10 +226,11 @@ impl SvgRenderer {
             let casing_color = darken_color(base_color, 0.9);
             let casing_width = road_type.get_width_scaled(scale_factor) + 2.0;
             self.svg.push_str(&format!(
-                r##"<use href="#{}" fill="none" stroke="{}" stroke-opacity="0.2" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/>"##,
+                r##"<use href="#{}" fill="none" stroke="{}" stroke-opacity="0.2" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"{} />"##,
                 path_id,
                 color_to_hex(casing_color),
-                fmt2(casing_width)
+                fmt2(casing_width),
+                mask_attr
             ));
             timings[t_idx] += crate::utils::performance_now() - start;
         }
@@ -212,15 +246,14 @@ impl SvgRenderer {
 
             let start = crate::utils::performance_now();
             self.svg.push_str(&format!(
-                r##"<use href="#{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/>"##,
+                r##"<use href="#{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"{} />"##,
                 path_id,
                 escape_attr(self.road_color_hex(road_type)),
-                fmt2(road_type.get_width_scaled(scale_factor))
+                fmt2(road_type.get_width_scaled(scale_factor)),
+                mask_attr
             ));
             timings[t_idx] += crate::utils::performance_now() - start;
         }
-
-        timings
     }
 
     pub fn draw_pois_bin_scaled(&mut self, data: &[f64], poi_ratio: f32) {
@@ -510,16 +543,17 @@ impl SvgRenderer {
         id
     }
 
-    fn build_polygon_path_data(&self, data: &[f64]) -> String {
+    fn build_polygon_path_data_list(&self, data: &[f64]) -> Vec<String> {
         if data.is_empty() || data[0] as usize == 0 {
-            return String::new();
+            return Vec::new();
         }
 
         let mut offset = 1;
         let poly_count = data[0] as usize;
-        let mut d = String::new();
+        let mut paths = Vec::new();
 
         for _ in 0..poly_count {
+            let mut d = String::new();
             if offset + 2 > data.len() {
                 break;
             }
@@ -547,9 +581,39 @@ impl SvgRenderer {
                 }
                 offset += count * 2;
             }
+
+            if !d.is_empty() {
+                paths.push(d);
+            }
         }
 
-        d
+        paths
+    }
+
+    fn build_road_path_data(&self, data: &[f64]) -> [String; 6] {
+        let road_count = data[0] as usize;
+        let mut paths: [String; 6] = std::array::from_fn(|_| String::new());
+        let mut offset = 1;
+
+        for _ in 0..road_count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let t = data[offset] as usize;
+            let count = data[offset + 1] as usize;
+            offset += 2;
+
+            if t < 6 && offset + count * 2 <= data.len() && count >= 2 {
+                let coords: Vec<(f32, f32)> = (0..count)
+                    .map(|i| self.world_to_screen((data[offset + i * 2], data[offset + i * 2 + 1])))
+                    .collect();
+                let simplified = simplify_screen_coords(&coords, 0.25);
+                push_line_path(&mut paths[t], &simplified);
+            }
+            offset += count * 2;
+        }
+
+        paths
     }
 }
 

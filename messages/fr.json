@@ -175,6 +175,7 @@
 	"toggle_show_city": "Nom de la ville",
 	"toggle_show_country": "Nom du pays",
 	"toggle_show_coords": "Coordonnées",
+	"toggle_road_mask_optimization": "Masquer les routes sur l’eau, les parcs et les espaces verts",
 	"toggle_show_pois": "Points d'Intérêt (POI)",
 	"poi_source_off": "Désactivé",
 	"poi_source_overpass": "Auto",

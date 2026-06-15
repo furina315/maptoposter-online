@@ -131,68 +131,113 @@ impl MapRenderer {
     //     self.draw_roads_bin_scaled(data, 1.0);
     // }
 
-    /// 绘制道路 (二进制直读版) 使用动态缩放因子
-    pub fn draw_roads_bin_scaled(&mut self, data: &[f64], scale_factor: f32) -> [f64; 6] {
-        if data.is_empty() {
+    pub fn draw_road_shards_masked_by_terrain_scaled(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        water_data: &[f64],
+        parks_data: &[f64],
+        scale_factor: f32,
+    ) -> [f64; 6] {
+        if road_shards.is_empty() {
+            return [0.0; 6];
+        }
+
+        crate::utils::time("render_map_bin: road_mask_optimization");
+        let mut timings = [0.0; 6];
+        let scale_factor = scale_factor * self.render_scale as f32;
+
+        let Some(mut roads_layer) = Pixmap::new(self.render_width(), self.render_height()) else {
+            self.draw_road_shards_directly(road_shards, scale_factor, &mut timings);
+            crate::utils::time_end("render_map_bin: road_mask_optimization");
+            return timings;
+        };
+
+        {
+            let mut target = roads_layer.as_mut();
+            for shard in road_shards {
+                if shard.is_empty() {
+                    continue;
+                }
+                let paths = self.build_road_paths(shard);
+                Self::draw_road_paths_on_pixmap(
+                    &mut target,
+                    &self.theme,
+                    self.render_scale,
+                    &paths,
+                    scale_factor,
+                    &mut timings,
+                );
+            }
+        }
+
+        let mut terrain_paths = self.build_polygon_paths(water_data);
+        terrain_paths.extend(self.build_polygon_paths(parks_data));
+        let clear_color = Color::from_rgba(0.0, 0.0, 0.0, 1.0).unwrap_or(Color::BLACK);
+        for path in &terrain_paths {
+            Self::fill_polygon_path_on(&mut roads_layer, path, clear_color, BlendMode::Clear);
+        }
+
+        self.pixmap.draw_pixmap(
+            0,
+            0,
+            roads_layer.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+
+        crate::utils::time_end("render_map_bin: road_mask_optimization");
+        timings
+    }
+
+    pub fn draw_road_shards_scaled(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        scale_factor: f32,
+    ) -> [f64; 6] {
+        if road_shards.is_empty() {
             return [0.0; 6];
         }
 
         let mut timings = [0.0; 6];
-
-        // [超采样] 将外部传入的缩放因子乘以内部超采样倍数，
-        // 使道路宽度在 2× 画布上保持与逻辑分辨率一致的视觉比例
         let scale_factor = scale_factor * self.render_scale as f32;
+        self.draw_road_shards_directly(road_shards, scale_factor, &mut timings);
+        timings
+    }
 
-        let road_count = data[0] as usize;
-
-        // 准备 6 个路径构建器，对应 6 种道路类型
-        let mut pbs: Vec<PathBuilder> = (0..6).map(|_| PathBuilder::new()).collect();
-        let mut found = vec![false; 6];
-
-        let mut curr_offset = 1;
-
-        // 【优化】：单次遍历二进制数据，按类型分发到不同的路径构建器
-        for _ in 0..road_count {
-            if curr_offset + 2 > data.len() {
-                break;
-            }
-            let t = data[curr_offset] as usize;
-            let count = data[curr_offset + 1] as usize;
-            curr_offset += 2;
-
-            if t < 6 {
-                if curr_offset + count * 2 <= data.len() && count >= 2 {
-                    // 先收集屏幕坐标
-                    let screen_coords: Vec<(f32, f32)> = (0..count)
-                        .map(|i| {
-                            self.world_to_screen((
-                                data[curr_offset + i * 2],
-                                data[curr_offset + i * 2 + 1],
-                            ))
-                        })
-                        .collect();
-
-                    // 简化：epsilon = 0.5 屏幕像素，过滤掉亚像素级冗余点
-                    let simplified = simplify_screen_coords(&screen_coords, 0.5 * 0.5); // 传入 epsilon²
-
-                    let pb = &mut pbs[t];
-                    pb.move_to(simplified[0].0, simplified[0].1);
-                    for &(sx, sy) in &simplified[1..] {
-                        pb.line_to(sx, sy);
-                    }
-                    found[t] = true;
-                }
-            }
-            curr_offset += count * 2;
-        }
-
-        // [Z-order + Road Casing] 将 PathBuilder 转为可复用的 Path（tiny_skia::Path 实现了 Clone）
-        let paths: Vec<Option<tiny_skia::Path>> = pbs
-            .into_iter()
-            .enumerate()
-            .map(|(i, pb)| if found[i] { pb.finish() } else { None })
+    fn draw_road_shards_directly(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        scale_factor: f32,
+        timings: &mut [f64; 6],
+    ) {
+        let prebuilt_paths: Vec<Vec<Option<tiny_skia::Path>>> = road_shards
+            .iter()
+            .filter(|shard| !shard.is_empty())
+            .map(|shard| self.build_road_paths(shard))
             .collect();
 
+        let mut target = self.pixmap.as_mut();
+        for paths in &prebuilt_paths {
+            Self::draw_road_paths_on_pixmap(
+                &mut target,
+                &self.theme,
+                self.render_scale,
+                &paths,
+                scale_factor,
+                timings,
+            );
+        }
+    }
+
+    fn draw_road_paths_on_pixmap(
+        pixmap: &mut tiny_skia::PixmapMut<'_>,
+        theme: &Theme,
+        render_scale: u32,
+        paths: &[Option<tiny_skia::Path>],
+        scale_factor: f32,
+        timings: &mut [f64; 6],
+    ) {
         // [Z-order] 道路绘制顺序：低优先级 → 高优先级，确保主干道始终在最上层
         // 枚举 index：Motorway=0, Primary=1, Secondary=2, Tertiary=3, Residential=4, Default=5
         // 从 index 5 向 0 渲染 = 从最低优先级到最高优先级
@@ -213,11 +258,10 @@ impl MapRenderer {
             let start = crate::utils::performance_now();
 
             let road_type = RoadType::from_u32(t_idx as u32);
-            let base_color = parse_hex_color(self.road_color_hex(road_type));
+            let base_color = parse_hex_color(Self::road_color_hex_for_theme(theme, road_type));
 
             // [Road Casing] Casing 宽度 = 道路宽 + 两侧各 1 逻辑像素（已含 render_scale 倍数）
-            let casing_width =
-                road_type.get_width_scaled(scale_factor) + 2.0 * self.render_scale as f32;
+            let casing_width = road_type.get_width_scaled(scale_factor) + 2.0 * render_scale as f32;
             // [Road Casing] Casing 颜色 = 道路色压暗 50%，形成描边对比
             let mut casing_color = darken_color(base_color, 0.9);
 
@@ -240,8 +284,7 @@ impl MapRenderer {
                 line_join: LineJoin::Round, // [Road Casing] 圆角拐点，消除锐角处的尖刺
                 ..Default::default()
             };
-            self.pixmap
-                .stroke_path(path, &paint, &stroke, Transform::identity(), None);
+            pixmap.stroke_path(path, &paint, &stroke, Transform::identity(), None);
 
             timings[t_idx] += crate::utils::performance_now() - start;
         }
@@ -257,7 +300,7 @@ impl MapRenderer {
             let road_type = RoadType::from_u32(t_idx as u32);
 
             let mut paint = Paint::default();
-            paint.set_color(parse_hex_color(self.road_color_hex(road_type)));
+            paint.set_color(parse_hex_color(Self::road_color_hex_for_theme(theme, road_type)));
             paint.anti_alias = true;
 
             let stroke = Stroke {
@@ -266,13 +309,10 @@ impl MapRenderer {
                 line_join: LineJoin::Round,
                 ..Default::default()
             };
-            self.pixmap
-                .stroke_path(path, &paint, &stroke, Transform::identity(), None);
+            pixmap.stroke_path(path, &paint, &stroke, Transform::identity(), None);
 
             timings[t_idx] += crate::utils::performance_now() - start;
         }
-
-        timings
     }
 
     /// 绘制多边形 (二进制直读版)
@@ -1312,6 +1352,60 @@ impl MapRenderer {
         }
 
         paths
+    }
+
+    fn build_road_paths(&self, data: &[f64]) -> Vec<Option<tiny_skia::Path>> {
+        let road_count = data[0] as usize;
+        let mut pbs: Vec<PathBuilder> = (0..6).map(|_| PathBuilder::new()).collect();
+        let mut found = vec![false; 6];
+        let mut curr_offset = 1;
+
+        for _ in 0..road_count {
+            if curr_offset + 2 > data.len() {
+                break;
+            }
+            let t = data[curr_offset] as usize;
+            let count = data[curr_offset + 1] as usize;
+            curr_offset += 2;
+
+            if t < 6 && curr_offset + count * 2 <= data.len() && count >= 2 {
+                let screen_coords: Vec<(f32, f32)> = (0..count)
+                    .map(|i| {
+                        self.world_to_screen((
+                            data[curr_offset + i * 2],
+                            data[curr_offset + i * 2 + 1],
+                        ))
+                    })
+                    .collect();
+                let simplified = simplify_screen_coords(&screen_coords, 0.5 * 0.5);
+
+                let pb = &mut pbs[t];
+                pb.move_to(simplified[0].0, simplified[0].1);
+                for &(sx, sy) in &simplified[1..] {
+                    pb.line_to(sx, sy);
+                }
+                found[t] = true;
+            }
+
+            curr_offset += count * 2;
+        }
+
+        pbs.into_iter()
+            .enumerate()
+            .map(|(i, pb)| if found[i] { pb.finish() } else { None })
+            .collect()
+    }
+
+    #[inline]
+    fn road_color_hex_for_theme(theme: &Theme, road_type: RoadType) -> &str {
+        match road_type {
+            RoadType::Motorway => &theme.road_motorway,
+            RoadType::Primary => &theme.road_primary,
+            RoadType::Secondary => &theme.road_secondary,
+            RoadType::Tertiary => &theme.road_tertiary,
+            RoadType::Residential => &theme.road_residential,
+            RoadType::Default => &theme.road_default,
+        }
     }
 
     /// 绘制文字（使用 fontdue）

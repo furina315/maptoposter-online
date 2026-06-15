@@ -566,6 +566,7 @@ export default function MapPosterGenerator() {
   const [showCoords, setShowCoords] = useState(true);
   const [showCity, setShowCity] = useState(true);
   const [showCountry, setShowCountry] = useState(true);
+  const [enableRoadMaskOptimization, setEnableRoadMaskOptimization] = useState(true);
   const [poiSource, setPoiSource] = useState<PoiSource>("off");
   const [customPois, setCustomPois] = useState<CustomPOI[]>([]);
   const [amapApiKey, setAmapApiKey] = useState("");
@@ -633,6 +634,7 @@ export default function MapPosterGenerator() {
       showCoords,
       showCity,
       showCountry,
+      enableRoadMaskOptimization,
       poiSource,
       customPois,
       amapApiKey,
@@ -669,6 +671,7 @@ export default function MapPosterGenerator() {
     showCoords,
     showCity,
     showCountry,
+    enableRoadMaskOptimization,
     poiSource,
     customPois,
     amapApiKey,
@@ -704,6 +707,9 @@ export default function MapPosterGenerator() {
         if (typeof config.showCoords === "boolean") setShowCoords(config.showCoords);
         if (typeof config.showCity === "boolean") setShowCity(config.showCity);
         if (typeof config.showCountry === "boolean") setShowCountry(config.showCountry);
+        if (typeof config.enableRoadMaskOptimization === "boolean") {
+          setEnableRoadMaskOptimization(config.enableRoadMaskOptimization);
+        }
         // Migrate the old boolean flag to the new mutually exclusive POI source enum.
         if (
           config.poiSource === "off" ||
@@ -1420,6 +1426,7 @@ export default function MapPosterGenerator() {
         show_coords: showCoords,
         show_city: showCity,
         show_country: showCountry,
+        enable_road_mask_optimization: enableRoadMaskOptimization,
         export_format: exportFormat,
         svg_font_mode: "embed",
         pin_theme_config: {
@@ -1522,6 +1529,7 @@ export default function MapPosterGenerator() {
         "Show Coords": String(showCoords),
         "Show City": String(showCity),
         "Show Country": String(showCountry),
+        "Road Mask Optimization": String(enableRoadMaskOptimization),
         Timestamp: new Date().toISOString(),
         "User Agent": navigator.userAgent,
       };
@@ -1734,9 +1742,11 @@ export default function MapPosterGenerator() {
                     showCoords={showCoords}
                     showCity={showCity}
                     showCountry={showCountry}
+                    enableRoadMaskOptimization={enableRoadMaskOptimization}
                     onShowCoordsChange={setShowCoords}
                     onShowCityChange={setShowCity}
                     onShowCountryChange={setShowCountry}
+                    onEnableRoadMaskOptimizationChange={setEnableRoadMaskOptimization}
                   />
                 </div>
 

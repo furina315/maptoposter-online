@@ -175,6 +175,7 @@
 	"toggle_show_city": "Название города",
 	"toggle_show_country": "Название страны",
 	"toggle_show_coords": "Координаты",
+	"toggle_road_mask_optimization": "Скрывать дороги поверх воды, парков и зеленых зон",
 	"toggle_show_pois": "Точки Интереса (POI)",
 	"poi_source_off": "Выкл",
 	"poi_source_overpass": "Авто",
