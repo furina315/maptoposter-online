@@ -3,6 +3,7 @@ use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use tiny_skia::Color;
 
+use crate::projection;
 use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, RoadType, TextPosition, Theme};
 use crate::utils::{calculate_font_size, format_city_name, format_coordinates, parse_hex_color};
 
@@ -210,7 +211,8 @@ impl SvgRenderer {
                 break;
             }
 
-            let (screen_x, screen_y) = self.world_to_screen((data[offset], data[offset + 1]));
+            let projected = projection::project_point(data[offset], data[offset + 1]);
+            let (screen_x, screen_y) = self.world_to_screen(projected);
             offset += 2;
 
             if screen_x < 0.0
@@ -274,7 +276,8 @@ impl SvgRenderer {
         let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
 
         for poi in pois {
-            let (screen_x, screen_y) = self.world_to_screen((poi.lon, poi.lat));
+            let projected = projection::project_point(poi.lon, poi.lat);
+            let (screen_x, screen_y) = self.world_to_screen(projected);
 
             if screen_x < 0.0
                 || screen_x > self.width as f32
@@ -390,32 +393,34 @@ impl SvgRenderer {
         } - 16.0;
 
         let offset_pool: [f32; 3] = [50.0 * scale_factor, 0.0, -40.0 * scale_factor];
-        let mut visible_items: Vec<(String, f32)> = Vec::new();
-
-        if show_city {
-            let formatted_city = format_city_name(city);
-            let city_size = calculate_font_size(&formatted_city, 80.0 * scale_factor, 30);
-            visible_items.push((formatted_city, city_size));
-        }
-        if show_country {
-            visible_items.push((country.to_uppercase(), 28.0 * scale_factor));
-        }
-        if show_coords {
-            visible_items.push((format_coordinates(lat, lon), 18.0 * scale_factor));
-        }
-
-        for (i, (text, font_size)) in visible_items.iter().enumerate() {
-            let top_y = base_y_px + offset_pool[i];
-            let y = svg_baseline_y(&font, *font_size, top_y);
-            let letter_spacing = estimate_svg_letter_spacing(&font, text, *font_size);
+        let mut visible_index = 0usize;
+        let mut draw_visible_text = |text: &str, font_size: f32| {
+            let top_y = base_y_px + offset_pool[visible_index];
+            let y = svg_baseline_y(&font, font_size, top_y);
+            let letter_spacing = estimate_svg_letter_spacing(&font, text, font_size);
             self.svg.push_str(&format!(
                 r#"<text class="mp-text" x="{}" y="{}" font-size="{}" text-anchor="middle" dominant-baseline="alphabetic" letter-spacing="{}">{}</text>"#,
                 fmt1(self.width as f32 / 2.0),
                 fmt1(y),
-                fmt2(*font_size),
+                fmt2(font_size),
                 fmt2(letter_spacing),
                 escape_text(text)
             ));
+            visible_index += 1;
+        };
+
+        if show_city {
+            let formatted_city = format_city_name(city);
+            let city_size = calculate_font_size(&formatted_city, 80.0 * scale_factor, 30);
+            draw_visible_text(&formatted_city, city_size);
+        }
+        if show_country {
+            let country_upper = country.to_uppercase();
+            draw_visible_text(&country_upper, 28.0 * scale_factor);
+        }
+        if show_coords {
+            let coords = format_coordinates(lat, lon);
+            draw_visible_text(&coords, 18.0 * scale_factor);
         }
 
         let attr_size = 10.0 * scale_factor;

@@ -212,38 +212,16 @@ fn render_map_binary_internal(
         .map(|p| if p.is_empty() { 0 } else { p[0] as usize })
         .unwrap_or(0);
     let custom_poi_count = config.custom_pois.as_ref().map(|pois| pois.len()).unwrap_or(0);
+    let road_shards = collect_road_shards(&roads_shards);
 
     let mut total_roads = 0usize;
     let mut road_type_counts = [0usize; 6];
 
-    if js_sys::Array::is_array(&roads_shards) {
-        let shards_array = js_sys::Array::from(&roads_shards);
-        for shard_val in shards_array.iter() {
-            if let Some(shard_typed) = shard_val.dyn_ref::<js_sys::Float64Array>() {
-                let vec = shard_typed.to_vec();
-                if !vec.is_empty() {
-                    let road_count = vec[0] as usize;
-                    total_roads += road_count;
-
-                    let mut offset = 1;
-                    for _ in 0..road_count {
-                        if offset + 2 <= vec.len() {
-                            let type_val = vec[offset] as usize;
-                            let point_count = vec[offset + 1] as usize;
-                            if type_val < 6 {
-                                road_type_counts[type_val] += 1;
-                            }
-                            offset += 2 + point_count * 2;
-                        }
-                    }
-                }
-            }
-        }
-    } else if let Some(shard_typed) = roads_shards.dyn_ref::<js_sys::Float64Array>() {
-        let vec = shard_typed.to_vec();
+    for shard in &road_shards {
+        let vec = shard.as_slice();
         if !vec.is_empty() {
             let road_count = vec[0] as usize;
-            total_roads = road_count;
+            total_roads += road_count;
 
             let mut offset = 1;
             for _ in 0..road_count {
@@ -319,19 +297,11 @@ fn render_map_binary_internal(
 
     let mut total_timings = [0.0; 6];
 
-    if js_sys::Array::is_array(&roads_shards) {
-        let shards_array = js_sys::Array::from(&roads_shards);
-        for shard_val in shards_array.iter() {
-            if let Some(shard_typed) = shard_val.dyn_ref::<js_sys::Float64Array>() {
-                let timings =
-                    renderer.draw_roads_bin_scaled(&shard_typed.to_vec(), road_width_scale);
-                for i in 0..6 {
-                    total_timings[i] += timings[i];
-                }
-            }
+    for shard in &road_shards {
+        let timings = renderer.draw_roads_bin_scaled(shard.as_slice(), road_width_scale);
+        for i in 0..6 {
+            total_timings[i] += timings[i];
         }
-    } else if let Some(shard_typed) = roads_shards.dyn_ref::<js_sys::Float64Array>() {
-        total_timings = renderer.draw_roads_bin_scaled(&shard_typed.to_vec(), road_width_scale);
     }
 
     time_end("render_map_bin: draw_roads");
@@ -347,33 +317,14 @@ fn render_map_binary_internal(
     // 投影并绘制 POI
     if let Some(custom_pois) = &config.custom_pois {
         if !custom_pois.is_empty() {
-            let mut projected_pois = custom_pois.clone();
-            for poi in &mut projected_pois {
-                let (proj_lon, proj_lat) = projection::project_point(poi.lon, poi.lat);
-                poi.lon = proj_lon;
-                poi.lat = proj_lat;
-            }
-
             time("render_map_bin: draw_custom_pois");
-            renderer.draw_custom_pois(&projected_pois, &config.pin_theme_config);
+            renderer.draw_custom_pois(custom_pois, &config.pin_theme_config);
             time_end("render_map_bin: draw_custom_pois");
         }
     } else if let Some(pois_data) = &config.pois {
         if !pois_data.is_empty() && pois_data[0] as usize > 0 {
-            let mut projected_pois = pois_data.clone();
-            let poi_count = projected_pois[0] as usize;
-            for i in 0..poi_count {
-                let offset = 1 + i * 2;
-                let (proj_lon, proj_lat) = projection::project_point(
-                    projected_pois[offset],     // lon
-                    projected_pois[offset + 1], // lat
-                );
-                projected_pois[offset] = proj_lon;
-                projected_pois[offset + 1] = proj_lat;
-            }
-
             time("render_map_bin: draw_pois");
-            renderer.draw_pois_bin(&projected_pois, config.pin_theme_config.poi_ratio);
+            renderer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio);
             time_end("render_map_bin: draw_pois");
         }
     }
@@ -407,6 +358,20 @@ fn render_map_binary_internal(
     time_end("render_map_bin: encode_png");
 
     RenderResult::success(config.width, config.height, png_data)
+}
+
+fn collect_road_shards(roads_shards: &JsValue) -> Vec<Vec<f64>> {
+    if js_sys::Array::is_array(roads_shards) {
+        let shards_array = js_sys::Array::from(roads_shards);
+        shards_array
+            .iter()
+            .filter_map(|shard_val| shard_val.dyn_ref::<js_sys::Float64Array>().map(|typed| typed.to_vec()))
+            .collect()
+    } else if let Some(shard_typed) = roads_shards.dyn_ref::<js_sys::Float64Array>() {
+        vec![shard_typed.to_vec()]
+    } else {
+        Vec::new()
+    }
 }
 
 fn render_map_binary_svg(
@@ -471,29 +436,14 @@ fn render_map_binary_svg(
 
     if let Some(custom_pois) = &config.custom_pois {
         if !custom_pois.is_empty() {
-            let mut projected_pois = custom_pois.clone();
-            for poi in &mut projected_pois {
-                let (proj_lon, proj_lat) = projection::project_point(poi.lon, poi.lat);
-                poi.lon = proj_lon;
-                poi.lat = proj_lat;
-            }
             time("render_map_bin: draw_custom_pois");
-            renderer.draw_custom_pois(&projected_pois, &config.pin_theme_config);
+            renderer.draw_custom_pois(custom_pois, &config.pin_theme_config);
             time_end("render_map_bin: draw_custom_pois");
         }
     } else if let Some(pois_data) = &config.pois {
         if !pois_data.is_empty() && pois_data[0] as usize > 0 {
-            let mut projected_pois = pois_data.clone();
-            let poi_count = projected_pois[0] as usize;
-            for i in 0..poi_count {
-                let offset = 1 + i * 2;
-                let (proj_lon, proj_lat) =
-                    projection::project_point(projected_pois[offset], projected_pois[offset + 1]);
-                projected_pois[offset] = proj_lon;
-                projected_pois[offset + 1] = proj_lat;
-            }
             time("render_map_bin: draw_pois");
-            renderer.draw_pois_bin_scaled(&projected_pois, config.pin_theme_config.poi_ratio);
+            renderer.draw_pois_bin_scaled(pois_data, config.pin_theme_config.poi_ratio);
             time_end("render_map_bin: draw_pois");
         }
     }

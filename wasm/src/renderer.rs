@@ -8,6 +8,7 @@ use tiny_skia::{
     RadialGradient, SpreadMode, Stroke, Transform,
 };
 
+use crate::projection;
 use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PolyFeature, Road, RoadType, TextPosition, Theme};
 use crate::utils::{calculate_font_size, format_city_name, format_coordinates, log, parse_hex_color};
 
@@ -614,9 +615,10 @@ impl MapRenderer {
             }
 
             if offset + 1 < data.len() {
-                let x = data[offset];
-                let y = data[offset + 1];
-                let (screen_x, screen_y) = self.world_to_screen((x, y));
+                let lon = data[offset];
+                let lat = data[offset + 1];
+                let projected = projection::project_point(lon, lat);
+                let (screen_x, screen_y) = self.world_to_screen(projected);
 
                 // 检查边界
                 if screen_x >= 0.0 && screen_x <= rw && screen_y >= 0.0 && screen_y <= rh {
@@ -708,7 +710,8 @@ impl MapRenderer {
         highlight_paint.anti_alias = true;
 
         for poi in pois {
-            let (screen_x, screen_y) = self.world_to_screen((poi.lon, poi.lat));
+            let projected = projection::project_point(poi.lon, poi.lat);
+            let (screen_x, screen_y) = self.world_to_screen(projected);
             if screen_x < 0.0 || screen_x > rw || screen_y < 0.0 || screen_y > rh {
                 continue;
             }
@@ -1308,30 +1311,40 @@ impl MapRenderer {
         // 偏移池按从最显眼（顶部）到最不显眼（底部）排列
         // 可见元素按 city → country → coords 优先级依次取偏移
         let offset_pool: [f32; 3] = [50.0 * scale_factor, 0.0, -40.0 * scale_factor];
-        let mut visible_items: Vec<(&str, String, f32)> = Vec::new();
+        let mut visible_index = 0usize;
 
         if show_city {
             let formatted_city = format_city_name(city);
             let city_size = calculate_font_size(&formatted_city, 80.0 * scale_factor, 30);
-            visible_items.push(("city", formatted_city, city_size));
-        }
-        if show_country {
-            let country_upper = country.to_uppercase();
-            let country_size = 28.0 * scale_factor;
-            visible_items.push(("country", country_upper, country_size));
-        }
-        if show_coords {
-            let coords_str = format_coordinates(lat, lon);
-            let coords_size = 18.0 * scale_factor;
-            visible_items.push(("coords", coords_str, coords_size));
-        }
-
-        for (i, (_kind, text, font_size)) in visible_items.iter().enumerate() {
             self.draw_text_centered(
                 &font,
-                text,
-                base_y_px + offset_pool[i],
-                *font_size,
+                &formatted_city,
+                base_y_px + offset_pool[visible_index],
+                city_size,
+                text_color,
+            );
+            visible_index += 1;
+        }
+
+        if show_country {
+            let country_upper = country.to_uppercase();
+            self.draw_text_centered(
+                &font,
+                &country_upper,
+                base_y_px + offset_pool[visible_index],
+                28.0 * scale_factor,
+                text_color,
+            );
+            visible_index += 1;
+        }
+
+        if show_coords {
+            let coords_str = format_coordinates(lat, lon);
+            self.draw_text_centered(
+                &font,
+                &coords_str,
+                base_y_px + offset_pool[visible_index],
+                18.0 * scale_factor,
                 text_color,
             );
         }

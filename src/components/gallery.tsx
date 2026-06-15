@@ -132,10 +132,7 @@ export function PosterGallery() {
       setScale(nextScale);
     }
 
-    if (
-      positionRef.current.x !== nextPosition.x ||
-      positionRef.current.y !== nextPosition.y
-    ) {
+    if (positionRef.current.x !== nextPosition.x || positionRef.current.y !== nextPosition.y) {
       positionRef.current = nextPosition;
       setPosition(nextPosition);
     }

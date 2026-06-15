@@ -634,9 +634,9 @@ export default function MapPosterGenerator() {
       showCity,
       showCountry,
       poiSource,
-        customPois,
-        amapApiKey,
-      };
+      customPois,
+      amapApiKey,
+    };
     const configJson = JSON.stringify(config);
     pendingPersistConfigRef.current = configJson;
 
