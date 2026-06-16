@@ -68,6 +68,8 @@ interface PinThemeConfig {
   style: PinThemeStyle;
   // 图标在圆形徽章中的相对尺寸，基于徽章直径
   iconScale: number;
+  // 图标纵向偏移，基于图标目标尺寸，正值向下
+  iconOffsetYScale: number;
   // 没有 SVG 图标时，中间回退小圆点的相对尺寸，基于徽章半径
   fallbackDotScale: number;
   // 外阴影透明度
@@ -144,6 +146,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
       highlightRadiusScale: 0.72,
       highlightSpread: 1.0,
       iconScale: 0.65,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.28,
       // --- solid-only fallback (dead when gradientEnabled=true) ---
       rimDarken: 0.82,
@@ -174,6 +177,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
       highlightRadiusScale: 0.72,
       highlightSpread: 1.0,
       iconScale: 0.45,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.24,
       rimDarken: 0.82,
       innerBodyDarken: 0.96,
@@ -189,10 +193,10 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     heart: {
       style: "puff",
       gradientEnabled: true,
-      shadowAlpha: 0.32,
-      shadowOffsetYScale: 0.32,
-      shadowRadiusScale: 0.92,
-      shadowSpread: 1.2,
+      shadowAlpha: 0.1,
+      shadowOffsetYScale: 0.1,
+      shadowRadiusScale: 1.05,
+      shadowSpread: 1.1,
       shadowColor: "#000000",
       poiRatio: 0.016,
       bodyLighten: 0.12,
@@ -202,7 +206,8 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
       highlightOffsetYScale: -0.28,
       highlightRadiusScale: 0.72,
       highlightSpread: 1.0,
-      iconScale: 0.5,
+      iconScale: 0.45,
+      iconOffsetYScale: 0.25,
       fallbackDotScale: 0.22,
       rimDarken: 0.82,
       innerBodyDarken: 0.96,
@@ -222,6 +227,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     circle: {
       style: "badge",
       iconScale: 0.78,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.28,
       // 阴影：扁平徽章，阴影小而实，不飘
       shadowAlpha: 0.22, // 0.18→0.22，徽章阴影清晰
@@ -256,6 +262,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     star: {
       style: "badge",
       iconScale: 0.64,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.24,
       shadowAlpha: 0.22,
       shadowOffsetYScale: 0.14,
@@ -285,6 +292,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     heart: {
       style: "badge",
       iconScale: 0.6,
+      iconOffsetYScale: 0.08,
       fallbackDotScale: 0.22,
       shadowAlpha: 0.22,
       shadowOffsetYScale: 0.14,
@@ -317,6 +325,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     circle: {
       style: "pinhead",
       iconScale: 0.78,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.28,
       // 阴影：硬质球体投影，清晰
       shadowAlpha: 0.24, // 0.20→0.24
@@ -351,6 +360,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     star: {
       style: "pinhead",
       iconScale: 0.64,
+      iconOffsetYScale: 0,
       fallbackDotScale: 0.24,
       shadowAlpha: 0.24,
       shadowOffsetYScale: 0.18,
@@ -380,6 +390,7 @@ const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThem
     heart: {
       style: "pinhead",
       iconScale: 0.58,
+      iconOffsetYScale: 0.5,
       fallbackDotScale: 0.22,
       shadowAlpha: 0.24,
       shadowOffsetYScale: 0.18,
@@ -747,7 +758,7 @@ export default function MapPosterGenerator() {
   const [showCoords, setShowCoords] = useState(true);
   const [showCity, setShowCity] = useState(true);
   const [showCountry, setShowCountry] = useState(true);
-  const [enableRoadMaskOptimization, setEnableRoadMaskOptimization] = useState(true);
+  const [enableRoadMaskOptimization, setEnableRoadMaskOptimization] = useState(false);
   const [poiSource, setPoiSource] = useState<PoiSource>("off");
   const [poiShape, setPoiShape] = useState<PoiShape>("circle");
   const [customPois, setCustomPois] = useState<CustomPOI[]>([]);
