@@ -74,10 +74,79 @@ pub enum PoiShape {
 pub fn default_poi_shape() -> PoiShape { PoiShape::Circle }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticRoadSamplingConfig {
+    pub motorway: u32,
+    pub primary: u32,
+    pub secondary: u32,
+    pub tertiary: u32,
+    pub residential: u32,
+    #[serde(rename = "default")]
+    pub default_road: u32,
+}
+
+impl DiagnosticRoadSamplingConfig {
+    pub fn values(&self) -> [u32; 6] {
+        [
+            self.motorway,
+            self.primary,
+            self.secondary,
+            self.tertiary,
+            self.residential,
+            self.default_road,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticPoiSamplingConfig {
+    pub standard: u32,
+    pub custom_badge: u32,
+    pub custom_icon: u32,
+}
+
+impl DiagnosticPoiSamplingConfig {
+    pub fn values(&self) -> [u32; 3] {
+        [self.standard, self.custom_badge, self.custom_icon]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticSamplingConfig {
+    pub background: u32,
+    pub water: u32,
+    pub parks: u32,
+    pub roads: DiagnosticRoadSamplingConfig,
+    pub pois: DiagnosticPoiSamplingConfig,
+    pub gradients: u32,
+    pub text: u32,
+}
+
+impl DiagnosticSamplingConfig {
+    pub fn all_values(&self) -> Vec<u32> {
+        let mut values = vec![self.background, self.water, self.parks, self.gradients, self.text];
+        values.extend(self.roads.values());
+        values.extend(self.pois.values());
+        values
+    }
+
+    pub fn uniform_scale(&self) -> Option<u32> {
+        let values = self.all_values();
+        let first = *values.first()?;
+        values.iter().all(|&value| value == first).then_some(first)
+    }
+
+    pub fn max_scale(&self) -> u32 {
+        self.all_values().into_iter().max().unwrap_or(1)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinThemeConfig {
     pub style: PinThemeStyle,
     pub icon_scale: f32,
+    #[serde(default)]
+    pub icon_offset_y_scale: f32,
     pub fallback_dot_scale: f32,
     pub shadow_alpha: f32,
     pub shadow_offset_y_scale: f32,
@@ -124,6 +193,7 @@ pub fn default_pin_theme_config() -> PinThemeConfig {
     PinThemeConfig {
         style: PinThemeStyle::Puff,
         icon_scale: 0.78,
+        icon_offset_y_scale: 0.0,
         fallback_dot_scale: 0.28,
         shadow_alpha: 0.12,
         shadow_offset_y_scale: 0.16,
@@ -255,6 +325,45 @@ impl RoadType {
             RoadType::Residential | RoadType::Default => 0.4,
         };
         base_width * scale_factor
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RoadRenderStats {
+    pub timings: [f64; 6],
+    pub casing_timings: [f64; 6],
+    pub fill_timings: [f64; 6],
+    pub build_paths_ms: f64,
+    pub stroke_casing_ms: f64,
+    pub stroke_fill_ms: f64,
+    pub raw_points: [usize; 6],
+    pub simplified_points: [usize; 6],
+}
+
+impl RoadRenderStats {
+    pub fn record_points(
+        &mut self,
+        road_type_idx: usize,
+        raw_points: usize,
+        simplified_points: usize,
+    ) {
+        if road_type_idx < self.raw_points.len() {
+            self.raw_points[road_type_idx] += raw_points;
+            self.simplified_points[road_type_idx] += simplified_points;
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        for i in 0..6 {
+            self.timings[i] += other.timings[i];
+            self.casing_timings[i] += other.casing_timings[i];
+            self.fill_timings[i] += other.fill_timings[i];
+            self.raw_points[i] += other.raw_points[i];
+            self.simplified_points[i] += other.simplified_points[i];
+        }
+        self.build_paths_ms += other.build_paths_ms;
+        self.stroke_casing_ms += other.stroke_casing_ms;
+        self.stroke_fill_ms += other.stroke_fill_ms;
     }
 }
 
@@ -408,6 +517,10 @@ pub fn default_frontend_scale() -> f32 {
 
 pub fn default_true() -> bool {
     true
+}
+
+pub fn default_false() -> bool {
+    false
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -122,8 +122,74 @@ interface PinThemeConfig {
   poiRatio: number;
 }
 
+type DiagnosticSamplingScale = number; // 1 | 2;
+
+interface RenderScaleRoadConfig {
+  motorway: DiagnosticSamplingScale;
+  primary: DiagnosticSamplingScale;
+  secondary: DiagnosticSamplingScale;
+  tertiary: DiagnosticSamplingScale;
+  residential: DiagnosticSamplingScale;
+  default: DiagnosticSamplingScale;
+}
+
+interface RenderScalePoiConfig {
+  standard: DiagnosticSamplingScale;
+  custom_badge: DiagnosticSamplingScale;
+  custom_icon: DiagnosticSamplingScale;
+}
+
+interface RenderScaleConfig {
+  background: DiagnosticSamplingScale;
+  water: DiagnosticSamplingScale;
+  parks: DiagnosticSamplingScale;
+  roads: RenderScaleRoadConfig;
+  pois: RenderScalePoiConfig;
+  gradients: DiagnosticSamplingScale;
+  text: DiagnosticSamplingScale;
+}
+
+function downloadTextFile(filename: string, content: string, mimeType = "application/json") {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function toJsonArrayChunks(chunks: ArrayLike<number>[]) {
+  return chunks.map((chunk) => Array.from(chunk));
+}
+
 // Internal-only marker theme switch.
 const INTERNAL_PIN_THEME_STYLE: PinThemeStyle = "puff";
+// 诊断数据下载开关。只有本地环境且此开关为 true 时，才会自动下载 Overpass/WASM fixture。
+const INTERNAL_ENABLE_DIAGNOSTIC_FIXTURE_DOWNLOADS = false;
+// 诊断日志下载开关。只有本地环境且此开关为 true 时，才会在导出成功后自动下载 render log。
+const INTERNAL_ENABLE_DIAGNOSTIC_LOG_DOWNLOADS = false;
+// 浏览器诊断用采样配置。后续直接手改这份对象即可，不再通过 profile 名字切换。
+const INTERNAL_RENDER_SCALE_CONFIG: RenderScaleConfig = {
+  background: 1, // 背景
+  water: 1, // 水体
+  parks: 1, // 公园绿地
+  roads: {
+    motorway: 2, // 高速
+    primary: 2, // 主干道
+    secondary: 1, // 次干道
+    tertiary: 1, // 三级道路
+    residential: 1, // 住宅
+    default: 1, // 默认
+  },
+  pois: {
+    standard: 1,
+    custom_badge: 1,
+    custom_icon: 1,
+  },
+  gradients: 1, // 渐变
+  text: 1, // 文字
+};
 // 内部测试用图钉主题参数表。
 // 修改这里的数值后，保存并刷新页面即可重新导出对比效果；仅调这些前端参数时，不需要重新打包 wasm。
 const INTERNAL_PIN_THEME_CONFIGS: Record<PinThemeStyle, Record<PoiShape, PinThemeConfig>> = {
@@ -428,6 +494,25 @@ interface RenderOptions {
   custom_font?: Uint8Array;
 }
 
+const diagnosticLogBuffer: string[] = [];
+
+function appendDiagnosticLog(line: string) {
+  diagnosticLogBuffer.push(`${new Date().toISOString()} ${line}`);
+}
+
+function resetDiagnosticLogBuffer() {
+  diagnosticLogBuffer.length = 0;
+}
+
+function snapshotDiagnosticLogBuffer(): string[] {
+  return [...diagnosticLogBuffer];
+}
+
+function logDiagnosticMessage(message: string) {
+  console.log(message);
+  appendDiagnosticLog(message);
+}
+
 function formatTimingMs(duration: number): string {
   return `${Math.round(duration)}ms`;
 }
@@ -440,7 +525,9 @@ function logClientTiming(
   const parts = Object.entries(timings)
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}=${typeof value === "number" ? formatTimingMs(value) : value}`);
-  console.log(`[Timing][${scope}][${name}] ${parts.join(" ")}`);
+  const line = `[Timing][${scope}][${name}] ${parts.join(" ")}`;
+  console.log(line);
+  appendDiagnosticLog(line);
 }
 
 // Example locations
@@ -499,6 +586,11 @@ function runInWorker(
     const handler = (event: MessageEvent) => {
       if (event.data.id === id) {
         worker.removeEventListener("message", handler);
+        if (Array.isArray(event.data.logs)) {
+          for (const line of event.data.logs as string[]) {
+            appendDiagnosticLog(`[Worker][${label}] ${line}`);
+          }
+        }
         if (event.data.success) {
           if (typeof event.data.duration === "number") {
             const scope = type === "render" ? "render" : "wasm";
@@ -567,6 +659,13 @@ function namesReferToSameLocation(first: string, second: string): boolean {
 }
 
 export default function MapPosterGenerator() {
+  const isLocalRuntime =
+    typeof window !== "undefined" &&
+    ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  const shouldDownloadDiagnosticFixtures =
+    INTERNAL_ENABLE_DIAGNOSTIC_FIXTURE_DOWNLOADS && isLocalRuntime;
+  const shouldDownloadDiagnosticLogs = INTERNAL_ENABLE_DIAGNOSTIC_LOG_DOWNLOADS && isLocalRuntime;
+
   const {
     countries,
     getStatesByCountry,
@@ -1441,6 +1540,11 @@ export default function MapPosterGenerator() {
 
   const handleDownload = async (scale: number, exportFormat: ExportFormat = "png") => {
     const generationStart = performance.now();
+    const renderScaleConfig = INTERNAL_RENDER_SCALE_CONFIG;
+    resetDiagnosticLogBuffer();
+    appendDiagnosticLog(
+      `[Export] start scale=${scale} format=${exportFormat} location=${location.country}/${location.state || "-"}/${location.city || "-"}/${location.district || "-"}`
+    );
     setIsGenerating(true);
     setGenerationProgress(0);
     currentStepRef.current = "step_init";
@@ -1463,7 +1567,7 @@ export default function MapPosterGenerator() {
         setGenerationStep(m.step_waiting_api({ seconds }));
       } else if (step.startsWith("step_retrying_error:")) {
         const seconds = step.split(":")[1];
-        console.log(
+        logDiagnosticMessage(
           `[App] step_retrying_error: seconds=${seconds}, message=${m.step_retrying_error({ seconds })}`
         );
         setGenerationStep(m.step_retrying_error({ seconds }));
@@ -1606,6 +1710,7 @@ export default function MapPosterGenerator() {
         theme: colors,
         width,
         height,
+        export_resolution_scale: scale,
         display_city:
           customTitle || location.district?.toUpperCase() || location.city.toUpperCase(),
         display_country: location.country,
@@ -1633,6 +1738,11 @@ export default function MapPosterGenerator() {
         enable_road_mask_optimization: enableRoadMaskOptimization,
         export_format: exportFormat,
         svg_font_mode: "embed",
+        ...(renderScaleConfig
+          ? {
+              render_scale_config: renderScaleConfig,
+            }
+          : {}),
         pin_theme_config: {
           ...internalPinThemeConfig,
           // 选择自动时，因为没有icon，所以需要更小的poi圆点
@@ -1642,6 +1752,8 @@ export default function MapPosterGenerator() {
       logClientTiming("processing", "prepareRenderConfig", {
         total: performance.now() - configStart,
         pois: poisBin.length.toString(),
+        exportResolutionScale: scale.toString(),
+        renderScaleConfig: JSON.stringify(renderScaleConfig),
       });
 
       setGenerationProgress(90);
@@ -1650,12 +1762,34 @@ export default function MapPosterGenerator() {
       await yieldMainThread();
 
       // 构建最终渲染载体
+      const configJson = JSON.stringify(config);
       const renderOptions: any = {
         roads_shards: processedRoadShards,
         water_bin: waterBin,
         parks_bin: parksBin,
-        config_json: JSON.stringify(config),
+        config_json: configJson,
       };
+
+      const fixtureSlug = (customTitle || location.district || location.city || "map")
+        .toLowerCase()
+        .replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-")
+        .replace(/^-+|-+$/g, "");
+      const fixtureTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const fixturePrefix = `${fixtureSlug || "map"}-${fixtureTimestamp}`;
+
+      if (shouldDownloadDiagnosticFixtures) {
+        const fixtureDownloadStart = performance.now();
+        downloadTextFile(
+          `${fixturePrefix}-roads-shards.json`,
+          JSON.stringify(toJsonArrayChunks(processedRoadShards))
+        );
+        downloadTextFile(`${fixturePrefix}-water-bin.json`, JSON.stringify(Array.from(waterBin)));
+        downloadTextFile(`${fixturePrefix}-parks-bin.json`, JSON.stringify(Array.from(parksBin)));
+        downloadTextFile(`${fixturePrefix}-config.json`, configJson);
+        logClientTiming("download", "diagnostic_fixture", {
+          total: performance.now() - fixtureDownloadStart,
+        });
+      }
 
       const finalTransfers: Transferable[] = [
         ...processedRoadShards.map((s) => s.buffer),
@@ -1688,10 +1822,8 @@ export default function MapPosterGenerator() {
         setGenerationProgress(97);
         currentStepRef.current = "step_downloading_file";
         setGenerationStep(m.step_downloading_file());
-        console.log(
-          "[App] generationCompleteRef set to true, isGameOpen:",
-          isGameOpen,
-          new Date().toISOString()
+        logDiagnosticMessage(
+          `[App] generationCompleteRef set to true isGameOpen=${String(isGameOpen)}`
         );
         generationCompleteRef.current = true;
         await yieldMainThread();
@@ -1701,17 +1833,37 @@ export default function MapPosterGenerator() {
         const blob = new Blob([renderedData as BlobPart], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
+        const outputBaseName = `${(customTitle || location.city).toLowerCase().replace(/\s+/g, "-")}-map-poster`;
         link.href = url;
-        link.download = `${(customTitle || location.city).toLowerCase().replace(/\s+/g, "-")}-map-poster.${exportFormat}`;
+        link.download = `${outputBaseName}.${exportFormat}`;
         link.click();
         logClientTiming("download", "file", { total: performance.now() - downloadStart });
         logClientTiming("generation", "total", { total: performance.now() - generationStart });
+        if (shouldDownloadDiagnosticLogs) {
+          const logFileContent = [
+            `export_file=${outputBaseName}.${exportFormat}`,
+            `fixture_prefix=${fixturePrefix}`,
+            `timestamp=${new Date().toISOString()}`,
+            `export_resolution_scale=${scale}`,
+            `export_resolution_label=${scale}x`,
+            `render_scale_config=${JSON.stringify(renderScaleConfig)}`,
+            `road_mask_optimization=${String(enableRoadMaskOptimization)}`,
+            "",
+            ...snapshotDiagnosticLogBuffer(),
+          ].join("\n");
+          downloadTextFile(`${fixturePrefix}-render-log.txt`, logFileContent, "text/plain");
+        }
         setGenerationProgress(100);
         currentStepRef.current = "step_complete";
         setGenerationStep(m.step_complete());
       }
     } catch (error) {
       console.error(m.error_generating(), error);
+      appendDiagnosticLog(
+        `[Error] ${m.error_generating()} ${
+          error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        }`
+      );
 
       const err = error instanceof Error ? error : new Error(String(error));
 
@@ -1724,6 +1876,7 @@ export default function MapPosterGenerator() {
         Coordinates: `${location.lat?.toFixed(4) ?? "?"}, ${location.lng?.toFixed(4) ?? "?"}`,
         Size: `${selectedSize.width}x${selectedSize.height}`,
         Scale: String(scale),
+        "Export Resolution Scale": `${scale}x`,
         Radius: `${baseRadius}m`,
         "LOD Mode": lodMode,
         Theme: selectedTheme.id,
@@ -1735,6 +1888,7 @@ export default function MapPosterGenerator() {
         "Show City": String(showCity),
         "Show Country": String(showCountry),
         "Road Mask Optimization": String(enableRoadMaskOptimization),
+        "Render Scale Config": JSON.stringify(renderScaleConfig),
         Timestamp: new Date().toISOString(),
         "User Agent": navigator.userAgent,
       };
@@ -1745,21 +1899,17 @@ export default function MapPosterGenerator() {
         diagnostics,
       });
     } finally {
-      console.log(
-        "[App] finally block, isGameOpenRef:",
-        isGameOpenRef.current,
-        "isGameOpen(state):",
-        isGameOpen,
-        "generationCompleteRef:",
-        generationCompleteRef.current,
-        new Date().toISOString()
+      logDiagnosticMessage(
+        `[App] finally block isGameOpenRef=${String(isGameOpenRef.current)} isGameOpen=${String(
+          isGameOpen
+        )} generationCompleteRef=${String(generationCompleteRef.current)}`
       );
       mapDataService.setProgressCallback(null);
       if (!isGameOpenRef.current) {
-        console.log("[App] finally: closing loading because game is not open");
+        logDiagnosticMessage("[App] finally: closing loading because game is not open");
         setIsGenerating(false);
       } else {
-        console.log("[App] finally: game is open, NOT closing loading");
+        logDiagnosticMessage("[App] finally: game is open, NOT closing loading");
       }
       workers.forEach((w) => w.terminate());
     }

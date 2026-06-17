@@ -11,7 +11,7 @@ use projection::{calculate_bounds, project_points_mut};
 use renderer::MapRenderer;
 use serde::Deserialize;
 use svg_renderer::SvgRenderer;
-use types::{RenderRequest, RenderResult};
+use types::{RenderRequest, RenderResult, RoadRenderStats};
 use wasm_bindgen::prelude::*;
 
 #[derive(Deserialize)]
@@ -139,7 +139,7 @@ pub struct BinaryRenderConfig {
     pub show_city: bool,
     #[serde(default = "types::default_true")]
     pub show_country: bool,
-    #[serde(default = "types::default_true")]
+    #[serde(default = "types::default_false")]
     pub enable_road_mask_optimization: bool,
     #[serde(default)]
     pub export_format: Option<String>,
@@ -147,6 +147,8 @@ pub struct BinaryRenderConfig {
     pub svg_font_mode: Option<String>,
     #[serde(default = "types::default_pin_theme_config")]
     pub pin_theme_config: types::PinThemeConfig,
+    #[serde(default)]
+    pub render_scale_config: Option<types::DiagnosticSamplingConfig>,
 }
 
 /// 主渲染函数 (二进制直读版本)
@@ -185,10 +187,16 @@ fn render_map_binary_internal(
     config_json: &str,
     font_data: &[u8],
 ) -> RenderResult {
+    let total_start = crate::utils::performance_now();
+    let config_parse_start = crate::utils::performance_now();
     let config: BinaryRenderConfig = match serde_json::from_str(config_json) {
         Ok(c) => c,
         Err(e) => return RenderResult::error(format!("Config JSON parse failed: {}", e)),
     };
+    log(&format!(
+        "[Timing][wasm][config_parse] total={:.2}ms",
+        crate::utils::performance_now() - config_parse_start
+    ));
 
     // 1. 计算边界框
     let bounds = calculate_bounds(
@@ -216,7 +224,16 @@ fn render_map_binary_internal(
         .map(|p| if p.is_empty() { 0 } else { p[0] as usize })
         .unwrap_or(0);
     let custom_poi_count = config.custom_pois.as_ref().map(|pois| pois.len()).unwrap_or(0);
+    let collect_road_shards_start = crate::utils::performance_now();
     let road_shards = collect_road_shards(&roads_shards);
+    let collect_road_shards_ms = crate::utils::performance_now() - collect_road_shards_start;
+    let road_shards_bytes = estimate_road_shards_bytes(&road_shards);
+    log(&format!(
+        "[Timing][wasm][collect_road_shards] total={:.2}ms shards={} road_shards_bytes={}",
+        collect_road_shards_ms,
+        road_shards.len(),
+        road_shards_bytes
+    ));
 
     let mut total_roads = 0usize;
     let mut road_type_counts = [0usize; 6];
@@ -255,6 +272,17 @@ fn render_map_binary_internal(
         road_type_counts[5]
     ));
 
+    let render_scale_config = config.render_scale_config.as_ref();
+
+    let uniform_render_scale = render_scale_config.and_then(|cfg| cfg.uniform_scale());
+    let requested_render_scale = if let Some(scale) = uniform_render_scale {
+        scale.max(1)
+    } else if render_scale_config.is_some() {
+        1
+    } else {
+        2
+    };
+
     let export_format = config.export_format.as_deref().unwrap_or("png");
     if export_format == "svg" {
         return render_map_binary_svg(
@@ -269,91 +297,200 @@ fn render_map_binary_internal(
 
     // 3. 创建渲染器
     let text_pos = config.text_position.unwrap_or(types::TextPosition::Top);
-    let mut renderer =
-        match MapRenderer::new(config.width, config.height, config.theme, bounds, text_pos) {
-            Some(r) => r,
-            None => return RenderResult::error("Failed to create renderer".to_string()),
-        };
+    let renderer_new_start = crate::utils::performance_now();
+    let mut renderer = match MapRenderer::new(
+        config.width,
+        config.height,
+        config.theme.clone(),
+        bounds,
+        text_pos,
+        requested_render_scale,
+    ) {
+        Some(r) => r,
+        None => return RenderResult::error("Failed to create renderer".to_string()),
+    };
+    log(&format!(
+        "[Timing][wasm][renderer_new] total={:.2}ms render_scale={} width={} height={} total_pixels={} main_pixmap_bytes={}",
+        crate::utils::performance_now() - renderer_new_start,
+        renderer.render_scale(),
+        renderer.render_width(),
+        renderer.render_height(),
+        renderer.pixel_count(),
+        renderer.main_pixmap_bytes()
+    ));
 
     // 4. 绘制
-    time("render_map_bin: draw_background");
-    renderer.draw_background();
-    time_end("render_map_bin: draw_background");
-
-    let water_color = renderer.get_theme().water.clone();
-    let parks_color = renderer.get_theme().parks.clone();
-
-    time("render_map_bin: draw_water");
-    renderer.draw_polygons_bin(water_bin, &water_color);
-    time_end("render_map_bin: draw_water");
-
-    time("render_map_bin: draw_parks");
-    renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, &parks_color);
-    time_end("render_map_bin: draw_parks");
-
-    time("render_map_bin: draw_roads");
-
     let road_width_scale = types::calculate_road_width_scale(
         config.selected_size_height as f32,
         config.frontend_scale,
         config.road_width_boost,
     );
+    let water_color = renderer.get_theme().water.clone();
+    let parks_color = renderer.get_theme().parks.clone();
 
-    let total_timings = if config.enable_road_mask_optimization {
-        renderer.draw_road_shards_masked_by_terrain_scaled(
+    if let Some(scale_config) = render_scale_config {
+        if let Some(uniform_scale) = uniform_render_scale {
+            log(&format!(
+                "[Render] Uniform render_scale_config detected; using direct render path at {}x",
+                uniform_scale
+            ));
+
+            time("render_map_bin: draw_background");
+            renderer.draw_background();
+            time_end("render_map_bin: draw_background");
+
+            time("render_map_bin: draw_water");
+            renderer.draw_polygons_bin(water_bin, &water_color);
+            time_end("render_map_bin: draw_water");
+
+            time("render_map_bin: draw_parks");
+            if config.enable_road_mask_optimization {
+                renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, &parks_color);
+            } else {
+                renderer.draw_polygons_bin(parks_bin, &parks_color);
+            }
+            time_end("render_map_bin: draw_parks");
+
+            time("render_map_bin: draw_roads");
+            let road_stats = if config.enable_road_mask_optimization {
+                renderer.draw_road_shards_masked_by_terrain_scaled(
+                    &road_shards,
+                    water_bin,
+                    parks_bin,
+                    road_width_scale,
+                )
+            } else {
+                renderer.draw_road_shards_scaled(&road_shards, road_width_scale)
+            };
+            time_end("render_map_bin: draw_roads");
+            log_road_stats("render_map_bin", &road_stats);
+
+            if let Some(custom_pois) = &config.custom_pois {
+                if !custom_pois.is_empty() {
+                    time("render_map_bin: draw_custom_pois");
+                    renderer.draw_custom_pois(custom_pois, &config.pin_theme_config, config.poi_shape);
+                    time_end("render_map_bin: draw_custom_pois");
+                }
+            } else if let Some(pois_data) = &config.pois {
+                if !pois_data.is_empty() && pois_data[0] as usize > 0 {
+                    time("render_map_bin: draw_pois");
+                    renderer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio, config.poi_shape);
+                    time_end("render_map_bin: draw_pois");
+                }
+            }
+
+            time("render_map_bin: draw_gradients");
+            renderer.draw_gradients();
+            time_end("render_map_bin: draw_gradients");
+
+            time("render_map_bin: draw_text");
+            if let Err(e) = renderer.draw_text(
+                &config.display_city,
+                &config.display_country,
+                config.center.lat,
+                config.center.lon,
+                font_data,
+                config.show_city,
+                config.show_country,
+                config.show_coords,
+            ) {
+                return RenderResult::error(format!("Failed to draw text: {}", e));
+            }
+            time_end("render_map_bin: draw_text");
+        } else {
+        draw_background_layer(&mut renderer, &config, bounds, scale_config.background);
+        draw_water_layer(&mut renderer, &config, bounds, scale_config.water, water_bin, &water_color);
+        draw_parks_layer(
+            &mut renderer,
+            &config,
+            bounds,
+            scale_config.parks,
+            parks_bin,
+            water_bin,
+            &parks_color,
+        );
+        let road_stats = match draw_roads_layers(
+            &mut renderer,
+            &config,
+            bounds,
             &road_shards,
             water_bin,
             parks_bin,
             road_width_scale,
-        )
+            &scale_config.roads,
+        ) {
+            Ok(stats) => stats,
+            Err(e) => return RenderResult::error(e),
+        };
+        log_road_stats("render_map_bin", &road_stats);
+        if let Err(e) = draw_poi_layers(&mut renderer, &config, bounds, font_data, scale_config) {
+            return RenderResult::error(e);
+        }
+        }
     } else {
-        renderer.draw_road_shards_scaled(&road_shards, road_width_scale)
-    };
+        time("render_map_bin: draw_background");
+        renderer.draw_background();
+        time_end("render_map_bin: draw_background");
 
-    time_end("render_map_bin: draw_roads");
+        time("render_map_bin: draw_water");
+        renderer.draw_polygons_bin(water_bin, &water_color);
+        time_end("render_map_bin: draw_water");
 
-    log("render_map_bin: draw_roads breakdown:");
-    log(&format!("  Motorway: {:.2}ms", total_timings[0]));
-    log(&format!("  Primary: {:.2}ms", total_timings[1]));
-    log(&format!("  Secondary: {:.2}ms", total_timings[2]));
-    log(&format!("  Tertiary: {:.2}ms", total_timings[3]));
-    log(&format!("  Residential: {:.2}ms", total_timings[4]));
-    log(&format!("  Default: {:.2}ms", total_timings[5]));
-
-    // 投影并绘制 POI
-    if let Some(custom_pois) = &config.custom_pois {
-        if !custom_pois.is_empty() {
-            time("render_map_bin: draw_custom_pois");
-            renderer.draw_custom_pois(custom_pois, &config.pin_theme_config, config.poi_shape);
-            time_end("render_map_bin: draw_custom_pois");
+        time("render_map_bin: draw_parks");
+        if config.enable_road_mask_optimization {
+            renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, &parks_color);
+        } else {
+            renderer.draw_polygons_bin(parks_bin, &parks_color);
         }
-    } else if let Some(pois_data) = &config.pois {
-        if !pois_data.is_empty() && pois_data[0] as usize > 0 {
-            time("render_map_bin: draw_pois");
-            renderer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio, config.poi_shape);
-            time_end("render_map_bin: draw_pois");
+        time_end("render_map_bin: draw_parks");
+
+        time("render_map_bin: draw_roads");
+        let road_stats = if config.enable_road_mask_optimization {
+            renderer.draw_road_shards_masked_by_terrain_scaled(
+                &road_shards,
+                water_bin,
+                parks_bin,
+                road_width_scale,
+            )
+        } else {
+            renderer.draw_road_shards_scaled(&road_shards, road_width_scale)
+        };
+        time_end("render_map_bin: draw_roads");
+        log_road_stats("render_map_bin", &road_stats);
+
+        if let Some(custom_pois) = &config.custom_pois {
+            if !custom_pois.is_empty() {
+                time("render_map_bin: draw_custom_pois");
+                renderer.draw_custom_pois(custom_pois, &config.pin_theme_config, config.poi_shape);
+                time_end("render_map_bin: draw_custom_pois");
+            }
+        } else if let Some(pois_data) = &config.pois {
+            if !pois_data.is_empty() && pois_data[0] as usize > 0 {
+                time("render_map_bin: draw_pois");
+                renderer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio, config.poi_shape);
+                time_end("render_map_bin: draw_pois");
+            }
         }
-    }
 
-    time("render_map_bin: draw_gradients");
-    renderer.draw_gradients();
-    time_end("render_map_bin: draw_gradients");
+        time("render_map_bin: draw_gradients");
+        renderer.draw_gradients();
+        time_end("render_map_bin: draw_gradients");
 
-    // 4. 绘制文字 (使用传入的字体数据)
-    time("render_map_bin: draw_text");
-    if let Err(e) = renderer.draw_text(
-        &config.display_city,
-        &config.display_country,
-        config.center.lat,
-        config.center.lon,
-        font_data,
-        config.show_city,
-        config.show_country,
-        config.show_coords,
-    ) {
-        return RenderResult::error(format!("Failed to draw text: {}", e));
+        time("render_map_bin: draw_text");
+        if let Err(e) = renderer.draw_text(
+            &config.display_city,
+            &config.display_country,
+            config.center.lat,
+            config.center.lon,
+            font_data,
+            config.show_city,
+            config.show_country,
+            config.show_coords,
+        ) {
+            return RenderResult::error(format!("Failed to draw text: {}", e));
+        }
+        time_end("render_map_bin: draw_text");
     }
-    time_end("render_map_bin: draw_text");
 
     // 5. 编码为 PNG
     time("render_map_bin: encode_png");
@@ -362,6 +499,11 @@ fn render_map_binary_internal(
         Err(e) => return RenderResult::error(format!("PNG encoding failed: {}", e)),
     };
     time_end("render_map_bin: encode_png");
+    log(&format!(
+        "[Timing][wasm][render_map_binary_internal_total] total={:.2}ms final_png_bytes={}",
+        crate::utils::performance_now() - total_start,
+        png_data.len()
+    ));
 
     RenderResult::success(config.width, config.height, png_data)
 }
@@ -377,6 +519,263 @@ fn collect_road_shards(roads_shards: &JsValue) -> Vec<Vec<f64>> {
         vec![shard_typed.to_vec()]
     } else {
         Vec::new()
+    }
+}
+
+fn estimate_road_shards_bytes(road_shards: &[Vec<f64>]) -> usize {
+    road_shards
+        .iter()
+        .map(|shard| shard.len() * std::mem::size_of::<f64>())
+        .sum()
+}
+
+fn make_layer_renderer(
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    render_scale: u32,
+) -> Result<MapRenderer, String> {
+    let text_pos = config.text_position.unwrap_or(types::TextPosition::Top);
+    MapRenderer::new(
+        config.width,
+        config.height,
+        config.theme.clone(),
+        bounds,
+        text_pos,
+        render_scale,
+    )
+    .ok_or_else(|| format!("Failed to create layer renderer for render_scale={render_scale}"))
+}
+
+fn draw_background_layer(
+    renderer: &mut MapRenderer,
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    render_scale: u32,
+) {
+    time("render_map_bin: draw_background");
+    if render_scale == renderer.render_scale() {
+        renderer.draw_background();
+    } else if let Ok(mut layer) = make_layer_renderer(config, bounds, render_scale) {
+        layer.draw_background();
+        renderer.compose_from(&layer);
+    }
+    time_end("render_map_bin: draw_background");
+}
+
+fn draw_water_layer(
+    renderer: &mut MapRenderer,
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    render_scale: u32,
+    water_bin: &[f64],
+    water_color: &str,
+) {
+    time("render_map_bin: draw_water");
+    if render_scale == renderer.render_scale() {
+        renderer.draw_polygons_bin(water_bin, water_color);
+    } else if let Ok(mut layer) = make_layer_renderer(config, bounds, render_scale) {
+        layer.draw_polygons_bin(water_bin, water_color);
+        renderer.compose_from(&layer);
+    }
+    time_end("render_map_bin: draw_water");
+}
+
+fn draw_parks_layer(
+    renderer: &mut MapRenderer,
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    render_scale: u32,
+    parks_bin: &[f64],
+    water_bin: &[f64],
+    parks_color: &str,
+) {
+    time("render_map_bin: draw_parks");
+    if render_scale == renderer.render_scale() {
+        if config.enable_road_mask_optimization {
+            renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, parks_color);
+        } else {
+            renderer.draw_polygons_bin(parks_bin, parks_color);
+        }
+    } else if let Ok(mut layer) = make_layer_renderer(config, bounds, render_scale) {
+        if config.enable_road_mask_optimization {
+            layer.draw_parks_bin_masked_by_water(parks_bin, water_bin, parks_color);
+        } else {
+            layer.draw_polygons_bin(parks_bin, parks_color);
+        }
+        renderer.compose_from(&layer);
+    }
+    time_end("render_map_bin: draw_parks");
+}
+
+fn draw_roads_layers(
+    renderer: &mut MapRenderer,
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    road_shards: &[Vec<f64>],
+    water_bin: &[f64],
+    parks_bin: &[f64],
+    road_width_scale: f32,
+    road_scales: &types::DiagnosticRoadSamplingConfig,
+) -> Result<RoadRenderStats, String> {
+    time("render_map_bin: draw_roads");
+    let mut stats = RoadRenderStats::default();
+    let mut unique_scales = road_scales.values().to_vec();
+    unique_scales.sort_unstable();
+    unique_scales.dedup();
+
+    for scale in unique_scales {
+        let enabled_types = [
+            road_scales.motorway == scale,
+            road_scales.primary == scale,
+            road_scales.secondary == scale,
+            road_scales.tertiary == scale,
+            road_scales.residential == scale,
+            road_scales.default_road == scale,
+        ];
+        if !enabled_types.iter().any(|enabled| *enabled) {
+            continue;
+        }
+
+        let layer_stats = if scale == renderer.render_scale() && !config.enable_road_mask_optimization {
+            renderer.draw_road_shards_filtered_scaled(road_shards, road_width_scale, &enabled_types)
+        } else {
+            let mut layer = make_layer_renderer(config, bounds, scale)?;
+            let layer_stats = if config.enable_road_mask_optimization {
+                layer.draw_road_shards_masked_by_terrain_scaled(
+                    road_shards,
+                    water_bin,
+                    parks_bin,
+                    road_width_scale,
+                )
+            } else {
+                layer.draw_road_shards_filtered_scaled(road_shards, road_width_scale, &enabled_types)
+            };
+            renderer.compose_from(&layer);
+            layer_stats
+        };
+        stats.merge(&layer_stats);
+    }
+
+    time_end("render_map_bin: draw_roads");
+    Ok(stats)
+}
+
+fn draw_poi_layers(
+    renderer: &mut MapRenderer,
+    config: &BinaryRenderConfig,
+    bounds: types::BoundingBox,
+    font_data: &[u8],
+    scale_config: &types::DiagnosticSamplingConfig,
+) -> Result<(), String> {
+    if let Some(custom_pois) = &config.custom_pois {
+        if !custom_pois.is_empty() {
+            time("render_map_bin: draw_custom_pois");
+            if scale_config.pois.custom_icon == renderer.render_scale() {
+                renderer.draw_custom_pois(custom_pois, &config.pin_theme_config, config.poi_shape);
+            } else {
+                let mut layer = make_layer_renderer(config, bounds, scale_config.pois.custom_icon)?;
+                layer.draw_custom_pois(custom_pois, &config.pin_theme_config, config.poi_shape);
+                renderer.compose_from(&layer);
+            }
+            time_end("render_map_bin: draw_custom_pois");
+        }
+    } else if let Some(pois_data) = &config.pois {
+        if !pois_data.is_empty() && pois_data[0] as usize > 0 {
+            time("render_map_bin: draw_pois");
+            if scale_config.pois.standard == renderer.render_scale() {
+                renderer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio, config.poi_shape);
+            } else {
+                let mut layer = make_layer_renderer(config, bounds, scale_config.pois.standard)?;
+                layer.draw_pois_bin(pois_data, config.pin_theme_config.poi_ratio, config.poi_shape);
+                renderer.compose_from(&layer);
+            }
+            time_end("render_map_bin: draw_pois");
+        }
+    }
+
+    time("render_map_bin: draw_gradients");
+    if scale_config.gradients == renderer.render_scale() {
+        renderer.draw_gradients();
+    } else {
+        let mut layer = make_layer_renderer(config, bounds, scale_config.gradients)?;
+        layer.draw_gradients();
+        renderer.compose_from(&layer);
+    }
+    time_end("render_map_bin: draw_gradients");
+
+    time("render_map_bin: draw_text");
+    if scale_config.text == renderer.render_scale() {
+        renderer.draw_text(
+            &config.display_city,
+            &config.display_country,
+            config.center.lat,
+            config.center.lon,
+            font_data,
+            config.show_city,
+            config.show_country,
+            config.show_coords,
+        )?;
+    } else {
+        let mut layer = make_layer_renderer(config, bounds, scale_config.text)?;
+        layer.draw_text(
+            &config.display_city,
+            &config.display_country,
+            config.center.lat,
+            config.center.lon,
+            font_data,
+            config.show_city,
+            config.show_country,
+            config.show_coords,
+        )?;
+        renderer.compose_from(&layer);
+    }
+    time_end("render_map_bin: draw_text");
+
+    Ok(())
+}
+
+const ROAD_TYPE_LABELS: [&str; 6] = [
+    "Motorway",
+    "Primary",
+    "Secondary",
+    "Tertiary",
+    "Residential",
+    "Default",
+];
+
+fn log_road_stats(scope: &str, stats: &RoadRenderStats) {
+    log(&format!("{scope}: draw_roads phases:"));
+    log(&format!("  build_road_paths: {:.2}ms", stats.build_paths_ms));
+    log(&format!("  stroke_casing: {:.2}ms", stats.stroke_casing_ms));
+    log(&format!("  stroke_fill: {:.2}ms", stats.stroke_fill_ms));
+
+    log(&format!("{scope}: draw_roads breakdown:"));
+    for (idx, label) in ROAD_TYPE_LABELS.iter().enumerate() {
+        log(&format!("  {label}: {:.2}ms", stats.timings[idx]));
+    }
+
+    log(&format!("{scope}: draw_roads casing breakdown:"));
+    for (idx, label) in ROAD_TYPE_LABELS.iter().enumerate() {
+        log(&format!("  {label}: {:.2}ms", stats.casing_timings[idx]));
+    }
+
+    log(&format!("{scope}: draw_roads fill breakdown:"));
+    for (idx, label) in ROAD_TYPE_LABELS.iter().enumerate() {
+        log(&format!("  {label}: {:.2}ms", stats.fill_timings[idx]));
+    }
+
+    log(&format!("{scope}: draw_roads points:"));
+    for (idx, label) in ROAD_TYPE_LABELS.iter().enumerate() {
+        let raw = stats.raw_points[idx];
+        let simplified = stats.simplified_points[idx];
+        let reduced_pct = if raw == 0 {
+            0.0
+        } else {
+            (1.0 - simplified as f64 / raw as f64) * 100.0
+        };
+        log(&format!(
+            "  {label}: {raw} -> {simplified} points ({reduced_pct:.1}% reduced)"
+        ));
     }
 }
 
@@ -403,7 +802,11 @@ fn render_map_binary_svg(
     time_end("render_map_bin: draw_water");
 
     time("render_map_bin: draw_parks");
-    renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, &parks_color);
+    if config.enable_road_mask_optimization {
+        renderer.draw_parks_bin_masked_by_water(parks_bin, water_bin, &parks_color);
+    } else {
+        renderer.draw_polygons_bin(parks_bin, &parks_color);
+    }
     time_end("render_map_bin: draw_parks");
 
     time("render_map_bin: draw_roads");
@@ -414,7 +817,7 @@ fn render_map_binary_svg(
     );
 
     let collected_road_shards = collect_road_shards(&roads_shards);
-    let total_timings = if config.enable_road_mask_optimization {
+    let road_stats = if config.enable_road_mask_optimization {
         renderer.draw_road_shards_masked_by_terrain_scaled(
             &collected_road_shards,
             water_bin,
@@ -426,14 +829,7 @@ fn render_map_binary_svg(
     };
 
     time_end("render_map_bin: draw_roads");
-
-    log("render_map_bin: draw_roads breakdown:");
-    log(&format!("  Motorway: {:.2}ms", total_timings[0]));
-    log(&format!("  Primary: {:.2}ms", total_timings[1]));
-    log(&format!("  Secondary: {:.2}ms", total_timings[2]));
-    log(&format!("  Tertiary: {:.2}ms", total_timings[3]));
-    log(&format!("  Residential: {:.2}ms", total_timings[4]));
-    log(&format!("  Default: {:.2}ms", total_timings[5]));
+    log_road_stats("render_map_bin", &road_stats);
 
     if let Some(custom_pois) = &config.custom_pois {
         if !custom_pois.is_empty() {
@@ -537,6 +933,7 @@ fn render_map_internal(mut request: RenderRequest) -> RenderResult {
         request.theme,
         bounds,
         text_pos,
+        2,
     ) {
         Some(r) => r,
         None => return RenderResult::error("Failed to create renderer".to_string()),

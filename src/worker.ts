@@ -13,9 +13,71 @@ const wasmPromise = init().then(() => {
 
 declare var self: Worker;
 
+const originalConsole = {
+  log: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+  time: console.time.bind(console),
+  timeEnd: console.timeEnd.bind(console),
+};
+
+let activeWorkerLogs: string[] | null = null;
+const activeTimers = new Map<string, number>();
+
+function formatConsoleArgs(args: unknown[]): string {
+  return args
+    .map((arg) => {
+      if (typeof arg === "string") return arg;
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    })
+    .join(" ");
+}
+
+function pushWorkerLog(level: string, message: string) {
+  if (activeWorkerLogs) {
+    activeWorkerLogs.push(`[${level}] ${message}`);
+  }
+}
+
+console.log = (...args: unknown[]) => {
+  pushWorkerLog("log", formatConsoleArgs(args));
+  originalConsole.log(...args);
+};
+
+console.warn = (...args: unknown[]) => {
+  pushWorkerLog("warn", formatConsoleArgs(args));
+  originalConsole.warn(...args);
+};
+
+console.error = (...args: unknown[]) => {
+  pushWorkerLog("error", formatConsoleArgs(args));
+  originalConsole.error(...args);
+};
+
+console.time = (label?: string) => {
+  const key = label ?? "default";
+  activeTimers.set(key, performance.now());
+  pushWorkerLog("time", key);
+  originalConsole.time(label);
+};
+
+console.timeEnd = (label?: string) => {
+  const key = label ?? "default";
+  const start = activeTimers.get(key);
+  const duration = start === undefined ? null : performance.now() - start;
+  activeTimers.delete(key);
+  pushWorkerLog("timeEnd", duration === null ? key : `${key}: ${duration.toFixed(3)} ms`);
+  originalConsole.timeEnd(label);
+};
+
 self.onmessage = async (event: MessageEvent) => {
   await wasmPromise;
   const { id, type, data } = event.data;
+  activeWorkerLogs = [];
 
   try {
     let result;
@@ -62,12 +124,16 @@ self.onmessage = async (event: MessageEvent) => {
       success: true,
       result,
       duration,
+      logs: activeWorkerLogs,
     });
   } catch (error) {
     self.postMessage({
       id,
       success: false,
       error: String(error),
+      logs: activeWorkerLogs,
     });
+  } finally {
+    activeWorkerLogs = null;
   }
 };

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use tiny_skia::Color;
 
 use crate::projection;
-use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PoiShape, RoadType, TextPosition, Theme};
+use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PoiShape, RoadRenderStats, RoadType, TextPosition, Theme};
 use crate::utils::{calculate_font_size, format_city_name, format_coordinates, parse_hex_color};
 
 pub struct SvgRenderer {
@@ -121,12 +121,12 @@ impl SvgRenderer {
         water_data: &[f64],
         parks_data: &[f64],
         scale_factor: f32,
-    ) -> [f64; 6] {
+    ) -> RoadRenderStats {
         if road_shards.is_empty() {
-            return [0.0; 6];
+            return RoadRenderStats::default();
         }
 
-        let mut timings = [0.0; 6];
+        let mut stats = RoadRenderStats::default();
         let scale_factor = scale_factor.max(0.0);
         let mut terrain_paths = self.build_polygon_path_data_list(water_data);
         terrain_paths.extend(self.build_polygon_path_data_list(parks_data));
@@ -155,41 +155,47 @@ impl SvgRenderer {
             if shard.is_empty() {
                 continue;
             }
-            let shard_paths = self.build_road_path_data(shard);
+            let build_start = crate::utils::performance_now();
+            let (shard_paths, raw_points, simplified_points) = self.build_road_path_data(shard);
+            stats.build_paths_ms += crate::utils::performance_now() - build_start;
             for i in 0..6 {
                 combined_paths[i].push_str(&shard_paths[i]);
+                stats.record_points(i, raw_points[i], simplified_points[i]);
             }
         }
 
-        self.draw_road_paths(&combined_paths, scale_factor, mask_id.as_deref(), &mut timings);
+        self.draw_road_paths(&combined_paths, scale_factor, mask_id.as_deref(), &mut stats);
 
-        timings
+        stats
     }
 
     pub fn draw_road_shards_scaled(
         &mut self,
         road_shards: &[Vec<f64>],
         scale_factor: f32,
-    ) -> [f64; 6] {
+    ) -> RoadRenderStats {
         if road_shards.is_empty() {
-            return [0.0; 6];
+            return RoadRenderStats::default();
         }
 
-        let mut timings = [0.0; 6];
+        let mut stats = RoadRenderStats::default();
         let scale_factor = scale_factor.max(0.0);
         let mut combined_paths: [String; 6] = std::array::from_fn(|_| String::new());
         for shard in road_shards {
             if shard.is_empty() {
                 continue;
             }
-            let shard_paths = self.build_road_path_data(shard);
+            let build_start = crate::utils::performance_now();
+            let (shard_paths, raw_points, simplified_points) = self.build_road_path_data(shard);
+            stats.build_paths_ms += crate::utils::performance_now() - build_start;
             for i in 0..6 {
                 combined_paths[i].push_str(&shard_paths[i]);
+                stats.record_points(i, raw_points[i], simplified_points[i]);
             }
         }
 
-        self.draw_road_paths(&combined_paths, scale_factor, None, &mut timings);
-        timings
+        self.draw_road_paths(&combined_paths, scale_factor, None, &mut stats);
+        stats
     }
 
     fn draw_road_paths(
@@ -197,7 +203,7 @@ impl SvgRenderer {
         paths: &[String; 6],
         scale_factor: f32,
         mask_id: Option<&str>,
-        timings: &mut [f64; 6],
+        stats: &mut RoadRenderStats,
     ) {
         let mask_attr = mask_id
             .map(|id| format!(r#" mask="url(#{id})""#))
@@ -213,7 +219,9 @@ impl SvgRenderer {
         });
 
         for &t_idx in &DRAW_ORDER {
-            if t_idx == RoadType::Residential as usize || paths[t_idx].is_empty() {
+            if (t_idx == RoadType::Residential as usize || t_idx == RoadType::Default as usize)
+                || paths[t_idx].is_empty()
+            {
                 continue;
             }
             let road_type = RoadType::from_u32(t_idx as u32);
@@ -232,7 +240,9 @@ impl SvgRenderer {
                 fmt2(casing_width),
                 mask_attr
             ));
-            timings[t_idx] += crate::utils::performance_now() - start;
+            let elapsed = crate::utils::performance_now() - start;
+            stats.timings[t_idx] += elapsed;
+            stats.stroke_casing_ms += elapsed;
         }
 
         for &t_idx in &DRAW_ORDER {
@@ -252,7 +262,9 @@ impl SvgRenderer {
                 fmt2(road_type.get_width_scaled(scale_factor)),
                 mask_attr
             ));
-            timings[t_idx] += crate::utils::performance_now() - start;
+            let elapsed = crate::utils::performance_now() - start;
+            stats.timings[t_idx] += elapsed;
+            stats.stroke_fill_ms += elapsed;
         }
     }
 
@@ -396,6 +408,7 @@ impl SvgRenderer {
                 screen_x,
                 screen_y,
                 marker_diameter * pin_theme_config.icon_scale,
+                pin_theme_config.icon_offset_y_scale,
             ) {
                 self.svg.push_str(&format!(
                     r#"<circle cx="{}" cy="{}" r="{}" fill="{}"/>"#,
@@ -591,9 +604,11 @@ impl SvgRenderer {
         paths
     }
 
-    fn build_road_path_data(&self, data: &[f64]) -> [String; 6] {
+    fn build_road_path_data(&self, data: &[f64]) -> ([String; 6], [usize; 6], [usize; 6]) {
         let road_count = data[0] as usize;
         let mut paths: [String; 6] = std::array::from_fn(|_| String::new());
+        let mut raw_points = [0usize; 6];
+        let mut simplified_points = [0usize; 6];
         let mut offset = 1;
 
         for _ in 0..road_count {
@@ -605,16 +620,32 @@ impl SvgRenderer {
             offset += 2;
 
             if t < 6 && offset + count * 2 <= data.len() && count >= 2 {
+                raw_points[t] += count;
                 let coords: Vec<(f32, f32)> = (0..count)
                     .map(|i| self.world_to_screen((data[offset + i * 2], data[offset + i * 2 + 1])))
                     .collect();
-                let simplified = simplify_screen_coords(&coords, 0.25);
+                let simplified = simplify_screen_coords(
+                    &coords,
+                    Self::road_simplify_epsilon_sq(RoadType::from_u32(t as u32)),
+                );
+                simplified_points[t] += simplified.len();
                 push_line_path(&mut paths[t], &simplified);
             }
             offset += count * 2;
         }
 
-        paths
+        (paths, raw_points, simplified_points)
+    }
+
+    #[inline]
+    fn road_simplify_epsilon_sq(road_type: RoadType) -> f32 {
+        match road_type {
+            RoadType::Motorway | RoadType::Primary => 0.5 * 0.5,
+            RoadType::Secondary => 0.75 * 0.75,
+            RoadType::Tertiary => 1.0 * 1.0,
+            RoadType::Residential => 1.5 * 1.5,
+            RoadType::Default => 1.75 * 1.75,
+        }
     }
 }
 
@@ -762,6 +793,7 @@ impl SvgRenderer {
         screen_x: f32,
         screen_y: f32,
         icon_size: f32,
+        icon_offset_y_scale: f32,
     ) -> bool {
         let Some(icon) = &poi.icon else {
             return false;
@@ -772,7 +804,8 @@ impl SvgRenderer {
 
         let icon_scale = icon_size / icon.view_box_width.max(icon.view_box_height);
         let translate_x = screen_x - icon.view_box_width * icon_scale * 0.5;
-        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5;
+        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5
+            + icon_size * icon_offset_y_scale;
 
         self.svg.push_str(&format!(
             r#"<g transform="translate({} {}) scale({})" fill="{}">"#,

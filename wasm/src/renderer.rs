@@ -9,7 +9,7 @@ use tiny_skia::{
 };
 
 use crate::projection;
-use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PoiShape, PolyFeature, Road, RoadType, TextPosition, Theme};
+use crate::types::{BoundingBox, PinThemeConfig, PinThemeStyle, PoiShape, PolyFeature, Road, RoadRenderStats, RoadType, TextPosition, Theme};
 use crate::utils::{calculate_font_size, format_city_name, format_coordinates, log, parse_hex_color};
 
 /// 地图渲染引擎
@@ -21,8 +21,6 @@ pub struct MapRenderer {
     width: u32,
     /// 逻辑输出高度（最终 PNG 的像素高，非内部画布高）
     height: u32,
-    x_factor: f64,
-    y_factor: f64,
     text_position: TextPosition,
     /// [超采样] 内部渲染倍数。实际 Pixmap = width×render_scale × height×render_scale。
     /// 导出时通过 Box Filter 下采样回逻辑尺寸，所有边缘细节更平滑。
@@ -37,9 +35,12 @@ impl MapRenderer {
         theme: Theme,
         bounds: BoundingBox,
         text_position: TextPosition,
+        render_scale: u32,
     ) -> Option<Self> {
-        // [超采样] 内部以 2× 分辨率创建画布；导出时再缩回逻辑尺寸
-        let render_scale = 2u32;
+        // [渲染尺度] 由调用方传入统一的 supersampling 倍率。
+        // 当前 PNG 渲染器仍是“全局单倍率”模型；浏览器诊断路径虽然已经支持更细的配置表，
+        // 但本阶段只消费全 1× / 全 2× 基线，混合倍率后续再落到具体图层。
+        let render_scale = render_scale.max(1);
         let render_width = width * render_scale;
         let render_height = height * render_scale;
 
@@ -47,17 +48,12 @@ impl MapRenderer {
 
         // [超采样] x_factor / y_factor 按实际像素尺寸计算，
         // world_to_screen 的输出坐标已自动处于 2× 空间，无需额外调整
-        let x_factor = render_width as f64 / bounds.width();
-        let y_factor = render_height as f64 / bounds.height();
-
         Some(Self {
             pixmap,
             theme,
             bounds,
             width, // 仅保存逻辑尺寸，用于 encode_png 最终输出
             height,
-            x_factor,
-            y_factor,
             text_position,
             render_scale,
         })
@@ -72,14 +68,43 @@ impl MapRenderer {
 
     /// 内部 Pixmap 的实际像素宽度（= width × render_scale）
     #[inline]
-    fn render_width(&self) -> u32 {
+    pub fn render_width(&self) -> u32 {
         self.width * self.render_scale
     }
 
     /// 内部 Pixmap 的实际像素高度（= height × render_scale）
     #[inline]
-    fn render_height(&self) -> u32 {
+    pub fn render_height(&self) -> u32 {
         self.height * self.render_scale
+    }
+
+    pub fn render_scale(&self) -> u32 {
+        self.render_scale
+    }
+
+    pub fn main_pixmap_bytes(&self) -> usize {
+        self.render_width() as usize * self.render_height() as usize * 4
+    }
+
+    pub fn pixel_count(&self) -> u64 {
+        self.render_width() as u64 * self.render_height() as u64
+    }
+
+    pub fn compose_from(&mut self, layer: &MapRenderer) {
+        let scale = self.render_scale as f32 / layer.render_scale as f32;
+        let transform = if (scale - 1.0).abs() < f32::EPSILON {
+            Transform::identity()
+        } else {
+            Transform::from_scale(scale, scale)
+        };
+        self.pixmap.draw_pixmap(
+            0,
+            0,
+            layer.pixmap.as_ref(),
+            &PixmapPaint::default(),
+            transform,
+            None,
+        );
     }
 
     // ── [Road Casing] 内部辅助：按道路类型返回主题颜色字符串 ─────────────────
@@ -137,46 +162,65 @@ impl MapRenderer {
         water_data: &[f64],
         parks_data: &[f64],
         scale_factor: f32,
-    ) -> [f64; 6] {
+    ) -> RoadRenderStats {
         if road_shards.is_empty() {
-            return [0.0; 6];
+            return RoadRenderStats::default();
         }
 
         crate::utils::time("render_map_bin: road_mask_optimization");
-        let mut timings = [0.0; 6];
+        let mut stats = RoadRenderStats::default();
         let scale_factor = scale_factor * self.render_scale as f32;
 
         let Some(mut roads_layer) = Pixmap::new(self.render_width(), self.render_height()) else {
-            self.draw_road_shards_directly(road_shards, scale_factor, &mut timings);
+            self.draw_road_shards_directly(road_shards, scale_factor, &mut stats);
             crate::utils::time_end("render_map_bin: road_mask_optimization");
-            return timings;
+            return stats;
         };
+        crate::utils::log(&format!(
+            "[Memory][wasm][draw_roads] roads_layer_bytes={}",
+            self.main_pixmap_bytes()
+        ));
 
         {
+            crate::utils::time("render_map_bin: road_mask_optimization: roads_layer_stroke");
             let mut target = roads_layer.as_mut();
             for shard in road_shards {
                 if shard.is_empty() {
                     continue;
                 }
-                let paths = self.build_road_paths(shard);
+                let build_start = crate::utils::performance_now();
+                let (paths, raw_points, simplified_points) = self.build_road_paths(shard);
+                stats.build_paths_ms += crate::utils::performance_now() - build_start;
+                for i in 0..6 {
+                    stats.record_points(i, raw_points[i], simplified_points[i]);
+                }
                 Self::draw_road_paths_on_pixmap(
                     &mut target,
                     &self.theme,
                     self.render_scale,
                     &paths,
                     scale_factor,
-                    &mut timings,
+                    &mut stats,
                 );
             }
+            crate::utils::time_end("render_map_bin: road_mask_optimization: roads_layer_stroke");
         }
 
+        crate::utils::time("render_map_bin: road_mask_optimization: build_polygon_paths_water");
         let mut terrain_paths = self.build_polygon_paths(water_data);
+        crate::utils::time_end("render_map_bin: road_mask_optimization: build_polygon_paths_water");
+        crate::utils::time("render_map_bin: road_mask_optimization: build_polygon_paths_parks");
         terrain_paths.extend(self.build_polygon_paths(parks_data));
+        crate::utils::time_end("render_map_bin: road_mask_optimization: build_polygon_paths_parks");
+
+        crate::utils::time("render_map_bin: road_mask_optimization: terrain_clear");
         let clear_color = Color::from_rgba(0.0, 0.0, 0.0, 1.0).unwrap_or(Color::BLACK);
         for path in &terrain_paths {
             Self::fill_polygon_path_on(&mut roads_layer, path, clear_color, BlendMode::Clear);
         }
+        crate::utils::time_end("render_map_bin: road_mask_optimization: terrain_clear");
 
+        crate::utils::time("render_map_bin: road_mask_optimization: layer_composite");
         self.pixmap.draw_pixmap(
             0,
             0,
@@ -185,37 +229,71 @@ impl MapRenderer {
             Transform::identity(),
             None,
         );
+        crate::utils::time_end("render_map_bin: road_mask_optimization: layer_composite");
 
         crate::utils::time_end("render_map_bin: road_mask_optimization");
-        timings
+        stats
     }
 
     pub fn draw_road_shards_scaled(
         &mut self,
         road_shards: &[Vec<f64>],
         scale_factor: f32,
-    ) -> [f64; 6] {
+    ) -> RoadRenderStats {
         if road_shards.is_empty() {
-            return [0.0; 6];
+            return RoadRenderStats::default();
         }
 
-        let mut timings = [0.0; 6];
+        let mut stats = RoadRenderStats::default();
         let scale_factor = scale_factor * self.render_scale as f32;
-        self.draw_road_shards_directly(road_shards, scale_factor, &mut timings);
-        timings
+        self.draw_road_shards_directly(road_shards, scale_factor, &mut stats);
+        stats
+    }
+
+    pub fn draw_road_shards_filtered_scaled(
+        &mut self,
+        road_shards: &[Vec<f64>],
+        logical_scale_factor: f32,
+        enabled_types: &[bool; 6],
+    ) -> RoadRenderStats {
+        if road_shards.is_empty() {
+            return RoadRenderStats::default();
+        }
+
+        let mut stats = RoadRenderStats::default();
+        let prebuilt_paths =
+            self.collect_filtered_road_paths(road_shards, self.render_scale, enabled_types, &mut stats);
+        let mut target = self.pixmap.as_mut();
+        let effective_scale_factor = logical_scale_factor * self.render_scale as f32;
+        for paths in &prebuilt_paths {
+            Self::draw_road_paths_on_pixmap(
+                &mut target,
+                &self.theme,
+                self.render_scale,
+                paths,
+                effective_scale_factor,
+                &mut stats,
+            );
+        }
+        stats
     }
 
     fn draw_road_shards_directly(
         &mut self,
         road_shards: &[Vec<f64>],
         scale_factor: f32,
-        timings: &mut [f64; 6],
+        stats: &mut RoadRenderStats,
     ) {
-        let prebuilt_paths: Vec<Vec<Option<tiny_skia::Path>>> = road_shards
-            .iter()
-            .filter(|shard| !shard.is_empty())
-            .map(|shard| self.build_road_paths(shard))
-            .collect();
+        let mut prebuilt_paths: Vec<Vec<Option<tiny_skia::Path>>> = Vec::new();
+        for shard in road_shards.iter().filter(|shard| !shard.is_empty()) {
+            let build_start = crate::utils::performance_now();
+            let (paths, raw_points, simplified_points) = self.build_road_paths(shard);
+            stats.build_paths_ms += crate::utils::performance_now() - build_start;
+            for i in 0..6 {
+                stats.record_points(i, raw_points[i], simplified_points[i]);
+            }
+            prebuilt_paths.push(paths);
+        }
 
         let mut target = self.pixmap.as_mut();
         for paths in &prebuilt_paths {
@@ -225,9 +303,30 @@ impl MapRenderer {
                 self.render_scale,
                 &paths,
                 scale_factor,
-                timings,
+                stats,
             );
         }
+    }
+
+    fn collect_filtered_road_paths(
+        &self,
+        road_shards: &[Vec<f64>],
+        render_scale_override: u32,
+        enabled_types: &[bool; 6],
+        stats: &mut RoadRenderStats,
+    ) -> Vec<Vec<Option<tiny_skia::Path>>> {
+        let mut prebuilt_paths: Vec<Vec<Option<tiny_skia::Path>>> = Vec::new();
+        for shard in road_shards.iter().filter(|shard| !shard.is_empty()) {
+            let build_start = crate::utils::performance_now();
+            let (paths, raw_points, simplified_points) =
+                self.build_road_paths_filtered(shard, render_scale_override, enabled_types);
+            stats.build_paths_ms += crate::utils::performance_now() - build_start;
+            for i in 0..6 {
+                stats.record_points(i, raw_points[i], simplified_points[i]);
+            }
+            prebuilt_paths.push(paths);
+        }
+        prebuilt_paths
     }
 
     fn draw_road_paths_on_pixmap(
@@ -236,7 +335,7 @@ impl MapRenderer {
         render_scale: u32,
         paths: &[Option<tiny_skia::Path>],
         scale_factor: f32,
-        timings: &mut [f64; 6],
+        stats: &mut RoadRenderStats,
     ) {
         // [Z-order] 道路绘制顺序：低优先级 → 高优先级，确保主干道始终在最上层
         // 枚举 index：Motorway=0, Primary=1, Secondary=2, Tertiary=3, Residential=4, Default=5
@@ -247,7 +346,7 @@ impl MapRenderer {
         // 所有 Casing 先于所有 Fill 渲染，防止低等级 Casing 压住高等级 Fill
         // [优化] Residential 跳过 Casing：宽度仅 0.4px，casing 效果几乎不可见
         for &t_idx in &DRAW_ORDER {
-            if t_idx == RoadType::Residential as usize {
+            if t_idx == RoadType::Residential as usize || t_idx == RoadType::Default as usize {
                 continue;
             }
 
@@ -286,7 +385,10 @@ impl MapRenderer {
             };
             pixmap.stroke_path(path, &paint, &stroke, Transform::identity(), None);
 
-            timings[t_idx] += crate::utils::performance_now() - start;
+            let elapsed = crate::utils::performance_now() - start;
+            stats.timings[t_idx] += elapsed;
+            stats.casing_timings[t_idx] += elapsed;
+            stats.stroke_casing_ms += elapsed;
         }
 
         // [Road Casing] 第二遍：按 Z 序绘制所有道路的「填充色」（Fill）
@@ -311,7 +413,10 @@ impl MapRenderer {
             };
             pixmap.stroke_path(path, &paint, &stroke, Transform::identity(), None);
 
-            timings[t_idx] += crate::utils::performance_now() - start;
+            let elapsed = crate::utils::performance_now() - start;
+            stats.timings[t_idx] += elapsed;
+            stats.fill_timings[t_idx] += elapsed;
+            stats.stroke_fill_ms += elapsed;
         }
     }
 
@@ -369,18 +474,31 @@ impl MapRenderer {
             self.draw_polygons_bin(parks_data, color_hex);
             return;
         };
+        crate::utils::log(&format!(
+            "[Memory][wasm][draw_parks] parks_layer_bytes={}",
+            self.main_pixmap_bytes()
+        ));
 
         let color = parse_hex_color(color_hex);
+        crate::utils::time("render_map_bin: park_mask_optimization: build_polygon_paths_parks");
         let park_paths = self.build_polygon_paths(parks_data);
+        crate::utils::time_end("render_map_bin: park_mask_optimization: build_polygon_paths_parks");
+        crate::utils::time("render_map_bin: park_mask_optimization: parks_layer_fill");
         for path in &park_paths {
             Self::fill_polygon_path_on(&mut parks_layer, path, color, BlendMode::SourceOver);
         }
+        crate::utils::time_end("render_map_bin: park_mask_optimization: parks_layer_fill");
 
+        crate::utils::time("render_map_bin: park_mask_optimization: build_polygon_paths_water");
         let water_paths = self.build_polygon_paths(water_data);
+        crate::utils::time_end("render_map_bin: park_mask_optimization: build_polygon_paths_water");
+        crate::utils::time("render_map_bin: park_mask_optimization: terrain_clear");
         for path in &water_paths {
             Self::fill_polygon_path_on(&mut parks_layer, path, color, BlendMode::Clear);
         }
+        crate::utils::time_end("render_map_bin: park_mask_optimization: terrain_clear");
 
+        crate::utils::time("render_map_bin: park_mask_optimization: layer_composite");
         self.pixmap.draw_pixmap(
             0,
             0,
@@ -389,6 +507,7 @@ impl MapRenderer {
             Transform::identity(),
             None,
         );
+        crate::utils::time_end("render_map_bin: park_mask_optimization: layer_composite");
     }
 
     /// 绘制道路
@@ -789,6 +908,7 @@ impl MapRenderer {
                 screen_x,
                 screen_y,
                 marker_radius * 2.0 * pin_theme_config.icon_scale,
+                pin_theme_config.icon_offset_y_scale,
             )
             {
                 let mut fallback_pb = PathBuilder::new();
@@ -819,6 +939,7 @@ impl MapRenderer {
         screen_x: f32,
         screen_y: f32,
         icon_size: f32,
+        icon_offset_y_scale: f32,
     ) -> bool {
         let Some(icon) = &poi.icon else {
             return false;
@@ -829,7 +950,8 @@ impl MapRenderer {
 
         let icon_scale = icon_size / icon.view_box_width.max(icon.view_box_height);
         let translate_x = screen_x - icon.view_box_width * icon_scale * 0.5;
-        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5;
+        let translate_y = screen_y - icon.view_box_height * icon_scale * 0.5
+            + icon_size * icon_offset_y_scale;
         let transform = Transform::from_scale(icon_scale, icon_scale)
             .post_translate(translate_x, translate_y);
 
@@ -1403,10 +1525,21 @@ impl MapRenderer {
         paths
     }
 
-    fn build_road_paths(&self, data: &[f64]) -> Vec<Option<tiny_skia::Path>> {
+    fn build_road_paths(&self, data: &[f64]) -> (Vec<Option<tiny_skia::Path>>, [usize; 6], [usize; 6]) {
+        self.build_road_paths_filtered(data, self.render_scale, &[true; 6])
+    }
+
+    fn build_road_paths_filtered(
+        &self,
+        data: &[f64],
+        render_scale_override: u32,
+        enabled_types: &[bool; 6],
+    ) -> (Vec<Option<tiny_skia::Path>>, [usize; 6], [usize; 6]) {
         let road_count = data[0] as usize;
         let mut pbs: Vec<PathBuilder> = (0..6).map(|_| PathBuilder::new()).collect();
         let mut found = vec![false; 6];
+        let mut raw_points = [0usize; 6];
+        let mut simplified_points = [0usize; 6];
         let mut curr_offset = 1;
 
         for _ in 0..road_count {
@@ -1417,16 +1550,21 @@ impl MapRenderer {
             let count = data[curr_offset + 1] as usize;
             curr_offset += 2;
 
-            if t < 6 && curr_offset + count * 2 <= data.len() && count >= 2 {
+            if t < 6 && enabled_types[t] && curr_offset + count * 2 <= data.len() && count >= 2 {
+                raw_points[t] += count;
                 let screen_coords: Vec<(f32, f32)> = (0..count)
                     .map(|i| {
-                        self.world_to_screen((
+                        self.world_to_screen_with_render_scale((
                             data[curr_offset + i * 2],
                             data[curr_offset + i * 2 + 1],
-                        ))
+                        ), render_scale_override)
                     })
                     .collect();
-                let simplified = simplify_screen_coords(&screen_coords, 0.5 * 0.5);
+                let simplified = simplify_screen_coords(
+                    &screen_coords,
+                    Self::road_simplify_epsilon_sq(RoadType::from_u32(t as u32)),
+                );
+                simplified_points[t] += simplified.len();
 
                 let pb = &mut pbs[t];
                 pb.move_to(simplified[0].0, simplified[0].1);
@@ -1439,10 +1577,13 @@ impl MapRenderer {
             curr_offset += count * 2;
         }
 
-        pbs.into_iter()
+        let paths = pbs
+            .into_iter()
             .enumerate()
             .map(|(i, pb)| if found[i] { pb.finish() } else { None })
-            .collect()
+            .collect();
+
+        (paths, raw_points, simplified_points)
     }
 
     #[inline]
@@ -1454,6 +1595,17 @@ impl MapRenderer {
             RoadType::Tertiary => &theme.road_tertiary,
             RoadType::Residential => &theme.road_residential,
             RoadType::Default => &theme.road_default,
+        }
+    }
+
+    #[inline]
+    fn road_simplify_epsilon_sq(road_type: RoadType) -> f32 {
+        match road_type {
+            RoadType::Motorway | RoadType::Primary => 0.5 * 0.5,
+            RoadType::Secondary => 0.75 * 0.75,
+            RoadType::Tertiary => 1.0 * 1.0,
+            RoadType::Residential => 1.5 * 1.5,
+            RoadType::Default => 1.75 * 1.75,
         }
     }
 
@@ -1775,15 +1927,27 @@ impl MapRenderer {
 
     /// 世界坐标 -> 屏幕坐标
     fn world_to_screen(&self, coord: (f64, f64)) -> (f32, f32) {
-        let x = ((coord.0 - self.bounds.min_x) * self.x_factor) as f32;
-        // [超采样] 使用实际画布高度做 Y 轴翻转，确保地理坐标正确映射到 2× 画布
-        let y =
-            self.render_height() as f32 - ((coord.1 - self.bounds.min_y) * self.y_factor) as f32;
+        self.world_to_screen_with_render_scale(coord, self.render_scale)
+    }
+
+    fn world_to_screen_with_render_scale(
+        &self,
+        coord: (f64, f64),
+        render_scale_override: u32,
+    ) -> (f32, f32) {
+        let render_width = self.width * render_scale_override;
+        let render_height = self.height * render_scale_override;
+        let x_factor = render_width as f64 / self.bounds.width();
+        let y_factor = render_height as f64 / self.bounds.height();
+        let x = ((coord.0 - self.bounds.min_x) * x_factor) as f32;
+        // [超采样] 使用实际画布高度做 Y 轴翻转，确保地理坐标正确映射到指定倍率画布
+        let y = render_height as f32 - ((coord.1 - self.bounds.min_y) * y_factor) as f32;
         (x, y)
     }
 
     /// 导出为 PNG（带 DPI 元数据）
     pub fn encode_png(self, dpi: u32) -> Result<Vec<u8>, String> {
+        let downsample_start = crate::utils::performance_now();
         let scale = self.render_scale as usize;
         let out_w = self.width as usize;
         let out_h = self.height as usize;
@@ -1824,9 +1988,27 @@ impl MapRenderer {
                 out_rgba.push((acc[3] / scale_sq + 0.5).min(255.0) as u8);
             }
         }
+        let downsample_ms = crate::utils::performance_now() - downsample_start;
+        crate::utils::log(&format!(
+            "[Timing][wasm][encode_png][downsample_rgba] total={:.2}ms out_rgba_bytes={} raw_rgba_bytes={} render_scale={} output_width={} output_height={}",
+            downsample_ms,
+            out_rgba.len(),
+            self.main_pixmap_bytes(),
+            self.render_scale,
+            self.width,
+            self.height
+        ));
 
         // [超采样] 步骤 3：将下采样后的 RGBA 数据编码为 PNG
+        let png_encode_start = crate::utils::performance_now();
         let raw = encode_rgba_to_png(&out_rgba, out_w as u32, out_h as u32)?;
+        let png_encode_ms = crate::utils::performance_now() - png_encode_start;
+        crate::utils::log(&format!(
+            "[Timing][wasm][encode_png][png_encode] total={:.2}ms raw_png_bytes={} rgba_bytes={}",
+            png_encode_ms,
+            raw.len(),
+            out_rgba.len()
+        ));
 
         // pHYs chunk 构造（逻辑不变）
         let ppm = (dpi as u64 * 10000 / 254) as u32; // 300 DPI = 11811
@@ -1852,6 +2034,12 @@ impl MapRenderer {
         result.extend_from_slice(&raw[..insert_pos]);
         result.extend_from_slice(&phys);
         result.extend_from_slice(&raw[insert_pos..]);
+        crate::utils::log(&format!(
+            "[Memory][wasm][encode_png] final_png_bytes={} raw_png_bytes={} out_rgba_bytes={}",
+            result.len(),
+            raw.len(),
+            out_rgba.len()
+        ));
 
         Ok(result)
     }
@@ -1920,24 +2108,37 @@ fn push_poi_shape(builder: &mut PathBuilder, shape: PoiShape, cx: f32, cy: f32, 
             builder.close();
         }
         PoiShape::Heart => {
-            let top_y = cy - radius * 0.2;
-            builder.move_to(cx, cy + radius);
+            let r = radius;
+
+            let notch_y = cy - r * 0.24;
+            let bottom_y = cy + r * 1.08;
+
+            builder.move_to(cx, notch_y);
+
             builder.cubic_to(
-                cx - radius * 1.0,
-                cy + radius * 0.45,
-                cx - radius * 1.05,
-                cy - radius * 0.35,
-                cx,
-                top_y,
+                cx - r * 0.10, cy - r * 0.62,
+                cx - r * 0.52, cy - r * 0.78,
+                cx - r * 0.78, cy - r * 0.46,
             );
+
             builder.cubic_to(
-                cx + radius * 1.05,
-                cy - radius * 0.35,
-                cx + radius * 1.0,
-                cy + radius * 0.45,
-                cx,
-                cy + radius,
+                cx - r * 1.02, cy - r * 0.12,
+                cx - r * 0.78, cy + r * 0.56,
+                cx,           bottom_y,
             );
+
+            builder.cubic_to(
+                cx + r * 0.78, cy + r * 0.56,
+                cx + r * 1.02, cy - r * 0.12,
+                cx + r * 0.78, cy - r * 0.46,
+            );
+
+            builder.cubic_to(
+                cx + r * 0.52, cy - r * 0.78,
+                cx + r * 0.10, cy - r * 0.62,
+                cx,           notch_y,
+            );
+
             builder.close();
         }
     }
@@ -2154,6 +2355,7 @@ mod tests {
             test_theme(),
             BoundingBox::new(0.0, 100.0, 0.0, 100.0),
             TextPosition::Top,
+            2,
         )
         .unwrap()
     }

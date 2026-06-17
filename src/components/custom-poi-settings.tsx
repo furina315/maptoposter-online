@@ -66,21 +66,21 @@ function RadioOptionGroup<T extends string>({
 export function CustomPOISettings({
   customPoiCount,
   poiSource,
-  poiShape,
+  // poiShape,
   onManageClick,
   onPoiSourceChange,
-  onPoiShapeChange,
+  // onPoiShapeChange,
 }: CustomPOISettingsProps) {
   const poiSourceOptions: { value: PoiSource; label: string }[] = [
     { value: "off", label: m.poi_source_off() },
     { value: "overpass", label: m.poi_source_overpass() },
     { value: "custom", label: m.poi_source_custom() },
   ];
-  const poiShapeOptions: { value: PoiShape; label: string }[] = [
-    { value: "circle", label: m.poi_shape_circle() },
-    { value: "star", label: m.poi_shape_star() },
-    { value: "heart", label: m.poi_shape_heart() },
-  ];
+  // const poiShapeOptions: { value: PoiShape; label: string }[] = [
+  //   { value: "circle", label: m.poi_shape_circle() },
+  //   { value: "star", label: m.poi_shape_star() },
+  //   { value: "heart", label: m.poi_shape_heart() },
+  // ];
 
   return (
     <Card className="border-border bg-card p-4">
@@ -119,7 +119,7 @@ export function CustomPOISettings({
             </div>
           </div>
         )}
-        {poiSource !== 'off' && (
+        {/* {poiSource !== 'off' && (
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wider text-muted-foreground">
               {m.poi_shape_label()}
@@ -131,7 +131,7 @@ export function CustomPOISettings({
               onChange={onPoiShapeChange}
             />
           </div>
-        )}
+        )} */}
         <p className="text-[12px] italic text-muted-foreground">
           {poiSource === "off"
             ? m.poi_hint_off()
