@@ -29,3 +29,10 @@ public/location-data
 docs/inner-docs
 docs/handoff
 fixtures/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

@@ -6,24 +6,20 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 import Sitemap from "vite-plugin-sitemap";
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 // https://vite.dev/config/
 export default defineConfig({
   base: "./",
-  plugins: [
-    paraglideVitePlugin({
-      project: "./project.inlang",
-      outdir: "./src/paraglide",
-    }),
-    react({
-      babel: {
-        plugins: ["babel-plugin-react-compiler"],
-      },
-    }),
-    Sitemap({ hostname: "http://maptoposter.0v0.one" }),
-    // oxlint({ path: 'oxlint.json' }),
-    wasm(),
-    tailwindcss(),
-  ],
+  plugins: [paraglideVitePlugin({
+    project: "./project.inlang",
+    outdir: "./src/paraglide",
+  }), react({
+    babel: {
+      plugins: ["babel-plugin-react-compiler"],
+    },
+  }), Sitemap({ hostname: "http://maptoposter.0v0.one" }), // oxlint({ path: 'oxlint.json' }),
+  wasm(), tailwindcss(), cloudflare()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
