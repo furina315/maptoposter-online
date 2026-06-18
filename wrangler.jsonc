@@ -2,7 +2,6 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "maptoposter-online",
   "compatibility_date": "2026-06-18",
-{
   "observability": {
     "enabled": false,
     "head_sampling_rate": 1,
@@ -17,13 +16,11 @@
       "persist": true,
       "head_sampling_rate": 1
     }
-  }
-},
+  },
   "assets": {
     "not_found_handling": "single-page-application"
   },
   "compatibility_flags": [
     "nodejs_compat"
   ]
-
 }
